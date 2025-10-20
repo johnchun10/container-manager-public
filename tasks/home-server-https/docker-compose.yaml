@@ -11,13 +11,13 @@ services:
     volumes:
       - ${T_BENCH_TASK_LOGS_PATH}:${T_BENCH_CONTAINER_LOGS_PATH}
       - ${T_BENCH_TASK_AGENT_LOGS_PATH}:${T_BENCH_CONTAINER_AGENT_LOGS_PATH}
-    ports:
-      - "443"
-      - "80"
+    # ports:
+    #   - "443"
+    #   - "80"
     depends_on:
       - google-api-mock
-    networks:
-      - homelab
+    # networks:
+    #   - homelab
     # Add homeserver.local as an alias for this container
     extra_hosts:
       - "homeserver.local:127.0.0.1"
@@ -27,11 +27,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api-mock
-    ports:
-      - "8080"
-    networks:
-      - homelab
+    # ports:
+    #   - "8080"
+    # networks:
+    #   - homelab
 
-networks:
-  homelab:
-    driver: bridge
+# networks:
+#   homelab:
+#     driver: bridge

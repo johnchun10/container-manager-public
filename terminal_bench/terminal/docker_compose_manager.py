@@ -11,7 +11,8 @@ from docker.models.containers import Container
 
 from terminal_bench.utils.env_model import EnvModel
 from terminal_bench.utils.logger import logger
-
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class DockerComposeEnvVars(EnvModel):
     task_docker_client_container_name: str | None = None
@@ -110,14 +111,18 @@ class DockerComposeManager:
             self._logger.debug(
                 f"Docker compose command failed with exit code {e.returncode}"
             )
+            print('Failed to start docker: {}'.format(e.returncode))
 
             self._logger.debug(f"Command: {' '.join(full_command)}")
+            print(f"Command: {' '.join(full_command)}")
 
             if e.stdout:
                 self._logger.debug(f"STDOUT: {e.stdout}")
+                print(f"STDOUT: {e.stdout}")
 
             if e.stderr:
                 self._logger.debug(f"STDERR: {e.stderr}")
+                print(f"STDERR: {e.stderr}")
 
             raise
 
@@ -230,6 +235,55 @@ class DockerComposeManager:
             container_dir=container_dir,
             container_filename=container_filename,
         )
+    
+    def get_hash(self, threads: int = 4) -> str:
+        """Compute a deterministic hash of all changed files inside the container."""
+
+        if self._client_container is None:
+            raise ValueError("Client container is not started")
+
+        try:
+            diff_files = self._client_container.diff()
+            changed_paths = sorted(
+                f["Path"] for f in diff_files if f.get("Kind") == 1  # Kind=1 = modified/added file
+            )
+            
+            print('Number of files changed: {}'.format(len(changed_paths)))
+
+            def hash_file_inside_container(path: str) -> tuple[str, str | None]:
+                """Run sha256sum on the file inside the container."""
+                try:
+                    exit_code, output = self._client_container.exec_run(
+                        f"bash -c 'test -f {path} && sha256sum {path} 2>/dev/null || true'"
+                    )
+                    if exit_code == 0 and output:
+                        file_hash = output.decode().strip().split()[0]
+                        return path, file_hash
+                    return path, None
+                except Exception:
+                    return path, None
+
+            results: list[tuple[str, str]] = []
+
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = {executor.submit(hash_file_inside_container, p): p for p in changed_paths}
+                for future in as_completed(futures):
+                    path, file_hash = future.result()
+                    if file_hash:
+                        results.append((path, file_hash))
+
+            # Deterministically combine hashes
+            sha = hashlib.sha256()
+            for path, file_hash in sorted(results, key=lambda x: x[0]):
+                sha.update(path.encode())
+                sha.update(bytes.fromhex(file_hash))
+
+            return sha.hexdigest()
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to compute container hash: {e}")
+
+
 
 
 @contextmanager

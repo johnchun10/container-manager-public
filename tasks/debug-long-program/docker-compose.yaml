@@ -16,8 +16,8 @@ services:
 
   program:
     image: python:3.13-slim-bookworm
-    ports:
-      - "8008:8008"
+    # ports:
+    #   - "8008:8008"
     volumes:
       - ./debug_server.py:/app/debug_server.py
     environment:

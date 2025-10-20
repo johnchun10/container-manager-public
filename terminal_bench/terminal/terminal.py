@@ -7,6 +7,7 @@ from terminal_bench.terminal.tmux_session import TmuxSession
 from terminal_bench.utils.livestreamer import Livestreamer
 from terminal_bench.utils.logger import logger
 
+import time
 
 class Terminal:
     def __init__(
@@ -75,6 +76,7 @@ class Terminal:
         else:
             user = "root"
 
+        print('USER IS: {}'.format(user))
         session = TmuxSession(
             session_name=session_name,
             container=self.container,
@@ -142,7 +144,9 @@ class Terminal:
                 DockerComposeManager.CONTAINER_SESSION_LOGS_PATH
             )
         )
-
+    
+    def get_hash(self) -> str:
+        return self._compose_manager.get_hash()
 
 @contextmanager
 def spin_up_terminal(
@@ -158,6 +162,28 @@ def spin_up_terminal(
     livestream: bool = False,
     disable_recording: bool = False,
 ) -> Generator[Terminal, None, None]:
+    
+    # Log all parameters
+    print(f"[TERMINAL] Starting terminal with parameters:")
+    print(f"  client_container_name: {client_container_name}")
+    print(f"  client_image_name: {client_image_name}")
+    print(f"  docker_compose_path: {docker_compose_path}")
+    print(f"  docker_image_name_prefix: {docker_image_name_prefix}")
+    print(f"  sessions_logs_path: {sessions_logs_path}")
+    print(f"  agent_logs_path: {agent_logs_path}")
+    print(f"  commands_path: {commands_path}")
+    print(f"  no_rebuild: {no_rebuild}")
+    print(f"  cleanup: {cleanup}")
+    print(f"  livestream: {livestream}")
+    print(f"  disable_recording: {disable_recording}")
+    
+    overall_start_time = time.time()
+    print(f"[TERMINAL] Overall process started at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(overall_start_time))}")
+    
+    # Terminal creation timing
+    terminal_creation_start = time.time()
+    print(f"[TERMINAL] Creating Terminal object...")
+    
     terminal = Terminal(
         client_container_name=client_container_name,
         client_image_name=client_image_name,
@@ -171,9 +197,32 @@ def spin_up_terminal(
         livestream=livestream,
         disable_recording=disable_recording,
     )
+    
+    terminal_creation_time = time.time() - terminal_creation_start
+    print(f"[TERMINAL] Terminal object created in {terminal_creation_time:.3f} seconds")
 
     try:
+        # Terminal start timing
+        start_time = time.time()
+        print(f"[TERMINAL] Starting terminal at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
+        
         terminal.start()
+        
+        start_duration = time.time() - start_time
+        print(f"[TERMINAL] Terminal started successfully in {start_duration:.3f} seconds")
+        
         yield terminal
+        
     finally:
+        # Terminal stop timing
+        stop_time = time.time()
+        print(f"[TERMINAL] Stopping terminal at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stop_time))}")
+        
         terminal.stop()
+        
+        stop_duration = time.time() - stop_time
+        overall_duration = time.time() - overall_start_time
+        
+        print(f"[TERMINAL] Terminal stopped in {stop_duration:.3f} seconds")
+        print(f"[TERMINAL] Total process duration: {overall_duration:.3f} seconds")
+        print(f"[TERMINAL] Process completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}")

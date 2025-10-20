@@ -24,7 +24,7 @@ services:
 
   vulnerable_service:
     image: python:3.13-slim-bookworm
-    container_name: vulnerable_login_service
+    # container_name: vulnerable_login_service
     volumes:
       - ./vulnerable_login.py:/app/vulnerable_login.py
       - shared_db:/shared
@@ -39,7 +39,7 @@ services:
 
   master_service:
     image: python:3.13-slim-bookworm
-    container_name: master_service
+    # container_name: master_service
     volumes:
       - ./services/master_service.py:/app/master_service.py
       - shared_db:/shared # Hidden database location

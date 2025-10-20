@@ -16,8 +16,8 @@ services:
 
   maze:
     image: python:3.13-slim-bookworm
-    ports:
-      - "8088:8088"
+    # ports:
+    #   - "8088:8088"
     volumes:
       - ./maze_server.py:/app/maze_server.py
       - ./gen_maze.py:/app/gen_maze.py

@@ -24,9 +24,9 @@ services:
       - http://node1:9000/mnt/data1
       - http://node2:9000/mnt/data2
       - http://node3:9000/mnt/data3
-    ports:
-      - 9000
-      - 9001
+    # ports:
+    #   - 9000
+    #   - 9001
     hostname: node1
     volumes:
       - /mnt/data1

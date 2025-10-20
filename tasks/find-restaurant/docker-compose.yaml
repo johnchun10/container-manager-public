@@ -19,11 +19,11 @@ services:
 
   services:
     image: python:3.13-slim-bookworm
-    ports:
-      - "8091:8091"
-      - "8092:8092"
-      - "8093:8093"
-      - "8094:8094"
+    # ports:
+    #   - "8091:8091"
+    #   - "8092:8092"
+    #   - "8093:8093"
+    #   - "8094:8094"
     volumes:
       - ./services/august_service.py:/app/august_service.py
       - ./services/taylor_service.py:/app/taylor_service.py

@@ -20,8 +20,8 @@ services:
 
   decryptor:
     image: python:3.13-slim-bookworm
-    ports:
-      - "8090:8090"
+    # ports:
+    #   - "8090:8090"
     volumes:
       - ./decryptor_server.py:/app/decryptor_server.py
       - shared_results:/app # Shared volume for results.txt
