@@ -3,12 +3,14 @@ from terminal_bench.terminal import Terminal
 from terminal_bench.handlers.trial_handler import TrialPaths, TaskPaths, Task
 from pathlib import Path
 import uuid
+import subprocess
 from typing import Dict
 from terminal_bench.terminal.tmux_session import TmuxSession
 from terminal_bench.terminal.docker_compose_manager import DockerComposeManager
 from terminal_bench.parsers.parser_factory import ParserFactory, ParserName
 from terminal_bench.parsers.base_parser import UnitTestStatus
 from terminal_bench.terminal.models import TerminalCommand
+import yaml
 
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
@@ -64,11 +66,143 @@ def start_terminal():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def get_all_container_by_id(rollout_id: str):
+    result = subprocess.run(
+        f"docker ps --filter name={rollout_id} --format '{{{{.Names}}}}'",
+        shell=True, capture_output=True, text=True
+    )
+    container_ids = result.stdout.strip().split('\n') if result.returncode == 0 and result.stdout.strip() else []
+    return container_ids
+
+def commit_container(container_names: list[str]):
+    commit_results = []
+    image_names = []
+    for container_name in container_names:
+        commit_result = subprocess.run(
+            ['docker', 'commit', container_name, f'{container_name}_fork'],
+            capture_output=True, text=True
+        )
+        if commit_result.returncode != 0:
+            return None, commit_result
+        image_names.append(f'{container_name}_fork')
+        commit_results.append(commit_result)
+    return image_names, None
+
+def delete_committed_images(image_names: list[str]):
+    commit_results = []
+    for image_name in image_names:
+        commit_result = subprocess.run(
+            ['docker', 'rmi', '-f', image_name],
+            capture_output=True, text=True
+        )
+        if commit_result.returncode != 0:
+            return commit_result
+        commit_results.append(commit_result)
+    return None
+#container names are image names
+def get_service_name_from_container_name(container_names):
+    # postgres-csv-clean_0f3e208d-dfdc-45cf-96c6-4a45c8424593_test_container-db-1
+    #
+    services_dict = {}
+    for container_name in container_names:
+        original_name = container_name
+        container_name = container_name.replace('_fork', '')
+        parts = container_name.split('_')
+        if parts[-1] == 'container':
+            services_dict['main'] = original_name
+        else:
+            service_name = parts[-1].split('-')[1]
+            services_dict[service_name] = original_name
+    return services_dict
+def create_forked_task_dir(container_names, task_name):
+    original_task_dir = Path(f'../tasks/{task_name}')
+    new_task_dir = Path(f'../tasks/{task_name}_fork')
+    if new_task_dir.exists():
+        subprocess.run(['rm', '-r', str(new_task_dir)])
+    subprocess.run(['cp', '-r', str(original_task_dir), str(new_task_dir)])
+    docker_compose_path = new_task_dir / 'docker-compose.yaml'
+
+    with open(docker_compose_path, 'r') as f:
+        docker_compose = yaml.safe_load(f)
+    service_names_dict = get_service_name_from_container_name(container_names)
+
+    for service_name, values in docker_compose['services'].items():
+        if service_name in service_names_dict.keys():
+            image_name = service_names_dict[service_name]
+            values['image'] = image_name
+        else:
+            values["image"] = service_names_dict['main']
+
+    # remove the build section if exists
+        if 'build' in values:
+            del values['build']
+    with open(docker_compose_path, 'w') as f:
+        yaml.dump(docker_compose, f)
+    return new_task_dir
+
+@app.route('/fork', methods=['POST'])
+def fork_terminal():
+    data = request.json
+    terminal_id = data['id']
+    new_rollout_id = data["rollout_id"]
+    if terminal_id not in terminals:
+        return jsonify({"error": "Terminal not found"}), 404
+    task_name = task_paths[terminal_id].input_path.parts[-1]
+    client_image_name = terminals[terminal_id]._compose_manager._client_image_name
+    rollout_id = client_image_name.split('_', 1)[1].replace('_test', '')
+
+    container_names = get_all_container_by_id(rollout_id)
+    image_names, commit_error = commit_container(container_names)
+
+    if commit_error:
+        return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
+    new_task_dir = create_forked_task_dir(image_names, task_name)
+    
+    # start a new terminal with the new task dir
+    docker_compose_path = new_task_dir / 'docker-compose.yaml'
+    new_client_image_name = f'{client_image_name}_fork'
+    new_client_container_name = f'{new_client_image_name}_container'
+    docker_image_name_prefix = f'{new_client_image_name}_docker'
+
+    trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(new_rollout_id))
+    trial_paths.mkdir()
+
+    try:
+        new_terminal = Terminal(
+            client_container_name=new_client_container_name,
+            client_image_name=new_client_image_name,
+            docker_image_name_prefix=docker_image_name_prefix,
+            docker_compose_path=docker_compose_path,
+            sessions_logs_path=trial_paths.sessions_path,
+            agent_logs_path=trial_paths.agent_logging_dir,
+            commands_path=trial_paths.commands_path,
+            no_rebuild=False,
+            cleanup=True,
+            livestream=False,
+            disable_recording=False,
+        )
+        new_terminal.start()
+        # print("deleting image names: ", image_names)
+        del_result = delete_committed_images(image_names)
+        if del_result:
+            print(f"Error deleting images: {del_result.stderr}")
+        new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
+        
+        new_terminal_id = str(uuid.uuid4())
+        terminals[new_terminal_id] = new_terminal
+        sessions[new_terminal_id] = new_session
+        trial_path[new_terminal_id] = trial_paths  # Use the new trial_paths, not the old one
+        task_paths[new_terminal_id] = TaskPaths(input_path=Path(f'../tasks/{task_name}_fork'))  # Use forked task directory
+        
+        return jsonify({"id": new_terminal_id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/stop', methods=['POST'])
 def stop_terminal():
     data = request.json
     terminal_id = data['id']
-    
+
     if terminal_id not in terminals:
         return jsonify({"error": "Terminal not found"}), 404
     
@@ -76,6 +210,10 @@ def stop_terminal():
         terminals[terminal_id].stop()
         del terminals[terminal_id]
         del sessions[terminal_id]
+        if terminal_id in trial_path:
+            del trial_path[terminal_id]
+        if terminal_id in task_paths:
+            del task_paths[terminal_id]
         return jsonify({"status": "stopped"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -223,4 +361,4 @@ def hash():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=9800)
+    app.run(debug=False, host='0.0.0.0', port=9800)
