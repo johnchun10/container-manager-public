@@ -20,9 +20,18 @@ sessions: Dict[str, TmuxSession] = {}
 trial_path: Dict[str, TrialPaths] = {}
 task_paths: Dict[str, TaskPaths] = {}
 
+"""
+Start a new terminal session.
+Arguments:
+- task_name: name of the task (str)
+- rollout_id: unique id for the rollout (str)
+Returns:
+- id: unique id for the terminal session (str)
+"""
 @app.route('/start', methods=['POST'])
 def start_terminal():
     data = request.json
+    print("Received start request with data:", data)
     task_name = data['task_name']
     rollout_id = data['rollout_id']
     
@@ -198,6 +207,14 @@ def fork_terminal():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+"""
+Stop a terminal session.
+Arguments:
+- id: unique id for the terminal session (str)
+Returns:
+- status: 'stopped' if successful (str)
+"""
 @app.route('/stop', methods=['POST'])
 def stop_terminal():
     data = request.json
@@ -218,9 +235,21 @@ def stop_terminal():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+"""
+Execute a command in the terminal session.
+Arguments:
+- id: unique id for the terminal session (str)
+- command: command to execute (str)
+- blocking: whether to block until command completes (bool)
+- timeout: maximum time to wait for command to complete (int)
+Returns:
+- status: 'executed' if successful (str)
+"""
+
 @app.route('/execute', methods=['POST'])
 def execute_command():
     data = request.json
+    print("Received execute request with data:", data)
     terminal_id = data['id']
     command = data['command']
     blocking = data['blocking']
@@ -234,6 +263,7 @@ def execute_command():
         sessions[terminal_id].send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
         return jsonify({"status": "executed"}), 200
     except Exception as e:
+        print(f"Error executing command: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/get_pane_logs', methods=['POST'])
@@ -361,4 +391,4 @@ def hash():
 
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=9800)
+    app.run(debug=False, host='0.0.0.0', port=9901)
