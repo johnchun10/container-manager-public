@@ -11,6 +11,9 @@ from terminal_bench.parsers.parser_factory import ParserFactory, ParserName
 from terminal_bench.parsers.base_parser import UnitTestStatus
 from terminal_bench.terminal.models import TerminalCommand
 import yaml
+import time
+import random
+import string
 
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
@@ -19,6 +22,28 @@ terminals: Dict[str, Terminal] = {}
 sessions: Dict[str, TmuxSession] = {}
 trial_path: Dict[str, TrialPaths] = {}
 task_paths: Dict[str, TaskPaths] = {}
+# path = "/home/bk478/susRL/tv-cache/data/appworld-train"
+path = "../tasks"
+rollout_env_id = {}
+task_dir_env_id = {}
+
+# @app.route('/env_to_rollout', methods=['POST'])
+# def get_rollout_from_env():
+#     data = request.json
+#     env_id = data['env_id']
+#     if env_id in rollout_env_id:
+#         return jsonify({'rollout_id': rollout_env_id[env_id]}), 200
+#     else:
+#         return jsonify({'error': 'Env ID not found'}), 404
+    
+# @app.route('/rollout_to_env', methods=['POST'])
+# def get_env_from_rollout():
+#     data = request.json
+#     rollout_id = data['rollout_id']
+#     for env_id, r_id in rollout_env_id.items():
+#         if r_id == rollout_id:
+#             return jsonify({'env_id': env_id}), 200
+#     return jsonify({'error': 'Rollout ID not found'}), 404
 
 """
 Start a new terminal session.
@@ -30,14 +55,19 @@ Returns:
 """
 @app.route('/start', methods=['POST'])
 def start_terminal():
+    start_time = time.perf_counter()
     data = request.json
     print("Received start request with data:", data)
     task_name = data['task_name']
-    rollout_id = data['rollout_id']
+    if 'rollout_id' not in data:
+        rollout_id = str(uuid.uuid4())
+    else:
+        rollout_id = data['rollout_id']
     
     terminal_id = str(uuid.uuid4())
     
-    docker_compose_path = Path(f"../tasks/{task_name}/docker-compose.yaml")
+    # docker_compose_path = Path(f"../tasks/{task_name}/docker-compose.yaml")
+    docker_compose_path = Path(f"{path}/{task_name}/docker-compose.yaml")
     if not docker_compose_path.exists():
         return jsonify({"error": f"File {docker_compose_path} does not exist"}), 400
     
@@ -61,18 +91,26 @@ def start_terminal():
         livestream=False,
         disable_recording=False,
     )
-    
+    end_time = time.perf_counter()
+    print(f"Initialized terminal in {(end_time - start_time):.2f} seconds")
     try:
+        st = time.perf_counter()
         terminal.start()
+        et = time.perf_counter()
+        print(f"Terminal started in {(et - st):.2f} seconds")
+        st = time.perf_counter()
         session = terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
         
         terminals[terminal_id] = terminal
         sessions[terminal_id] = session
         trial_path[terminal_id] = trial_paths
-        task_paths[terminal_id] = TaskPaths(input_path=Path(f'../tasks/{task_name}'))
-        
+        task_paths[terminal_id] = TaskPaths(input_path=Path(f"{path}/{task_name}"))
+        et = time.perf_counter()
+        print(f"Session created in {(et - st):.2f} seconds")
+        rollout_env_id[terminal_id] = rollout_id
         return jsonify({"id": terminal_id}), 200
     except Exception as e:
+        print(f"Error starting terminal for task {task_name}: {e}")
         return jsonify({"error": str(e)}), 500
 
 def get_all_container_by_id(rollout_id: str):
@@ -83,17 +121,18 @@ def get_all_container_by_id(rollout_id: str):
     container_ids = result.stdout.strip().split('\n') if result.returncode == 0 and result.stdout.strip() else []
     return container_ids
 
-def commit_container(container_names: list[str]):
+def commit_container(container_names: list[str], old_rollout_id: str, new_rollout_id: str):
     commit_results = []
     image_names = []
     for container_name in container_names:
+        new_container_name = container_name.replace(old_rollout_id, new_rollout_id)
         commit_result = subprocess.run(
-            ['docker', 'commit', container_name, f'{container_name}_fork'],
+            ['docker', 'commit', container_name, f'{new_container_name}'],
             capture_output=True, text=True
         )
         if commit_result.returncode != 0:
             return None, commit_result
-        image_names.append(f'{container_name}_fork')
+        image_names.append(f'{new_container_name}')
         commit_results.append(commit_result)
     return image_names, None
 
@@ -115,7 +154,8 @@ def get_service_name_from_container_name(container_names):
     services_dict = {}
     for container_name in container_names:
         original_name = container_name
-        container_name = container_name.replace('_fork', '')
+        while '_fork' in container_name:
+            container_name = container_name.replace('_fork', '')
         parts = container_name.split('_')
         if parts[-1] == 'container':
             services_dict['main'] = original_name
@@ -123,9 +163,16 @@ def get_service_name_from_container_name(container_names):
             service_name = parts[-1].split('-')[1]
             services_dict[service_name] = original_name
     return services_dict
-def create_forked_task_dir(container_names, task_name):
-    original_task_dir = Path(f'../tasks/{task_name}')
-    new_task_dir = Path(f'../tasks/{task_name}_fork')
+def create_forked_task_dir(container_names, task_name, terminal_id):
+    if terminal_id not in task_dir_env_id:
+        print(f"No task directory found for terminal id {terminal_id}, must be first fork")
+        original_task_dir = Path(f"{path}/{task_name}")
+    else:
+        print(f"Using existing task directory for terminal id {terminal_id}")
+        original_task_dir = Path(task_dir_env_id[terminal_id])
+    # random 6 char string
+    random_string = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    new_task_dir = Path(f"{path}/{task_name}_{random_string}")
     if new_task_dir.exists():
         subprocess.run(['rm', '-r', str(new_task_dir)])
     subprocess.run(['cp', '-r', str(original_task_dir), str(new_task_dir)])
@@ -152,24 +199,39 @@ def create_forked_task_dir(container_names, task_name):
 @app.route('/fork', methods=['POST'])
 def fork_terminal():
     data = request.json
+    if "id" not in data:
+        return jsonify({"error": "No terminal id provided"}), 400
     terminal_id = data['id']
-    new_rollout_id = data["rollout_id"]
+    new_rollout_id = str(uuid.uuid4())
+    # if 'rollout_id' not in data:
+    #     new_rollout_id = str(uuid.uuid4())
+    # else:
+    #     new_rollout_id = data["rollout_id"]
     if terminal_id not in terminals:
+        print("Terminal not found:", terminal_id)
         return jsonify({"error": "Terminal not found"}), 404
     task_name = task_paths[terminal_id].input_path.parts[-1]
     client_image_name = terminals[terminal_id]._compose_manager._client_image_name
-    rollout_id = client_image_name.split('_', 1)[1].replace('_test', '')
+    
+    # rollout_id = client_image_name.split('_', 1)[1].replace('_test', '')
+    if terminal_id not in rollout_env_id:
+        print("Rollout ID not found for terminal:", terminal_id)
+        return jsonify({"error": "Rollout ID not found for terminal"}), 404
+    rollout_id = rollout_env_id[terminal_id]
+    print("Rolling out from rollout id:", rollout_id)
 
     container_names = get_all_container_by_id(rollout_id)
-    image_names, commit_error = commit_container(container_names)
-
+    print("Container names:", container_names)
+    image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
+    print("Committed forked image names:", image_names)
     if commit_error:
         return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
-    new_task_dir = create_forked_task_dir(image_names, task_name)
-    
+    new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
+
+    client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
     # start a new terminal with the new task dir
     docker_compose_path = new_task_dir / 'docker-compose.yaml'
-    new_client_image_name = f'{client_image_name}_fork'
+    new_client_image_name = f'{client_image_name}'
     new_client_container_name = f'{new_client_image_name}_container'
     docker_image_name_prefix = f'{new_client_image_name}_docker'
 
@@ -195,16 +257,24 @@ def fork_terminal():
         del_result = delete_committed_images(image_names)
         if del_result:
             print(f"Error deleting images: {del_result.stderr}")
-        new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
+        print("deleted committed images successfully")
+        # remove new directory
+        # subprocess.run(['rm', '-r', str(new_task_dir)])
         
+        print(f"list of running containers {image_names}")
+        new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
+        print("created new session successfully")
         new_terminal_id = str(uuid.uuid4())
+        task_dir_env_id[new_terminal_id] = str(new_task_dir)
+        rollout_env_id[new_terminal_id] = new_rollout_id
         terminals[new_terminal_id] = new_terminal
         sessions[new_terminal_id] = new_session
         trial_path[new_terminal_id] = trial_paths  # Use the new trial_paths, not the old one
-        task_paths[new_terminal_id] = TaskPaths(input_path=Path(f'../tasks/{task_name}_fork'))  # Use forked task directory
-        
+        task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{path}/{new_task_dir}"))  # Use forked task directory
+
         return jsonify({"id": new_terminal_id}), 200
     except Exception as e:
+        print(f"Error forking terminal: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -221,6 +291,7 @@ def stop_terminal():
     terminal_id = data['id']
 
     if terminal_id not in terminals:
+        print("Terminal not found:", terminal_id)
         return jsonify({"error": "Terminal not found"}), 404
     
     try:
@@ -231,8 +302,17 @@ def stop_terminal():
             del trial_path[terminal_id]
         if terminal_id in task_paths:
             del task_paths[terminal_id]
+        if terminal_id in rollout_env_id:
+            del rollout_env_id[terminal_id]
+        if terminal_id in task_dir_env_id:
+            # remove the forked task directory
+            forked_task_dir = Path(task_dir_env_id[terminal_id])
+            if forked_task_dir.exists():
+                subprocess.run(['rm', '-r', str(forked_task_dir)])
+            del task_dir_env_id[terminal_id]
         return jsonify({"status": "stopped"}), 200
     except Exception as e:
+        print(f"Error stopping terminal: {e}")
         return jsonify({"error": str(e)}), 500
 
 """
@@ -277,6 +357,7 @@ def get_pane_logs():
         pane_output = sessions[terminal_id].capture_pane(capture_entire=True)
         return jsonify({"logs": pane_output}), 200
     except Exception as e:
+        print(f"Error getting pane logs: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/test', methods=['POST'])
@@ -330,7 +411,8 @@ def run_tests():
         return jsonify({'passed': test_result})
 
     except Exception as e:
-        return jsonify({'error': "Error while setting up enviornment for tests"}), 404
+        print(f"Error while setting up environment for tests: {e}")
+        return jsonify({'error': f"Error while setting up environment for tests: {e}"}), 404
 
 @app.route('/solve', methods=['POST'])
 def solve():
@@ -371,9 +453,11 @@ def solve():
         return jsonify({'solved': True})
     
     except TimeoutError as error:
+        print(f"Error solving terminal {terminal_id}: {error}")
         return jsonify({'solved': "Error, command timedout"}), 404
     
     except Exception as error:
+        print(f"Error solving terminal {terminal_id}: {error}")
         return jsonify({'solved': "Error: {}".format(error)}), 500
 
 @app.route('/hash', methods=['POST'])
@@ -384,7 +468,8 @@ def hash():
     if terminal_id in terminals:
         try:
             return jsonify({'hash': terminals[terminal_id].get_hash()})
-        except Exception:
+        except Exception as e:
+            print(f"Error getting hash for terminal {terminal_id}: {e}")
             return jsonify({'hash': 'error'})
 
     return jsonify({'error': 'Terminal with id {} not found'.format(terminal_id)})
