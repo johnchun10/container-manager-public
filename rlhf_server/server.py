@@ -13,6 +13,7 @@ from terminal_bench.terminal.models import TerminalCommand
 import yaml
 import time
 import random
+import re
 import string
 
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
@@ -24,6 +25,7 @@ trial_path: Dict[str, TrialPaths] = {}
 task_paths: Dict[str, TaskPaths] = {}
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
 path = "../tasks"
+container_resurrect_path = "/root/tmux_resurrect"
 rollout_env_id = {}
 task_dir_env_id = {}
 
@@ -44,6 +46,84 @@ task_dir_env_id = {}
 #         if r_id == rollout_id:
 #             return jsonify({'env_id': env_id}), 200
 #     return jsonify({'error': 'Rollout ID not found'}), 404
+
+def setup_tmux_res_in_container(container_name: str):
+    """Copy the tmux resurrect files to the specified container."""
+    # /home/bk478/susRL/tv-cache/rlhf-container-manager/rlhf_server/tmux-res
+    try: 
+        local_resurrect_path = "/home/bk478/susRL/tv-cache/rlhf-container-manager/rlhf_server/tmux-res"
+        subprocess.run(
+                ["docker", "cp", str(local_resurrect_path), f"{container_name}:{container_resurrect_path}"],
+                check=True
+            )
+            # update ~/.tmux.conf
+        subprocess.run(
+            [
+                "docker", "exec", container_name,
+                "bash", "-c",
+                f"chmod -R 755 '{container_resurrect_path}' && "
+                f"echo \"set -g @resurrect-dir '{container_resurrect_path}'\" >> ~/.tmux.conf && "
+                "echo \"set -g @resurrect-capture-pane-contents 'on'\" >> ~/.tmux.conf && "
+                "echo \"set -g @resurrect-save-bash-history 'on'\" >> ~/.tmux.conf && "
+                f"echo \"run-shell '{container_resurrect_path}/resurrect.tmux'\" >> ~/.tmux.conf && "
+                "tmux source-file ~/.tmux.conf"
+            ],
+            check=True
+        )
+        # subprocess.run(
+        # [
+        #     "docker", "exec", container_name,
+        #     "tmux", "send-keys", "-t", "agent", 
+        #     f"chmod -R 755 '{container_resurrect_path}'"
+        # ],
+        # check=True,
+        # text=True
+        # )
+    except Exception as e:
+        print(f"Error copying tmux resurrect to container {container_name}: {e}")
+
+def save_tmux_session(container_name: str):
+    """Save the specified tmux session in the container using tmux-resurrect."""
+    print("Saving tmux session for container:", container_name)
+    try:
+        # subprocess.run(
+        # [
+        #     "docker", "exec", container_name,
+        #     "bash", "-c",
+        #     f"chmod -R 755 '{container_resurrect_path}'"
+        # ],
+        # check=True,
+        # text=True
+        # )
+        subprocess.run([
+            "docker", "exec", container_name,
+            "tmux", "send-keys", "-t", "agent",   # name of the existing session
+            f"{container_resurrect_path}/scripts/save.sh", "Enter"
+        ], check=True)
+        
+    except Exception as e:
+        print(f"Error saving tmux session in container {container_name}: {e}")
+
+def restore_tmux_session(container_name: str):
+    """Restore the specified tmux session in the container using tmux-resurrect."""
+    print("Restoring tmux session for container:", container_name)
+    try:
+        # subprocess.run(
+        # [
+        #     "docker", "exec", container_name,
+        #     "tmux", "send-keys", "-t", "agent", 
+        #     f"chmod -R 755 '{container_resurrect_path}'", "Enter"
+        # ],
+        # check=True,
+        # text=True
+        # )
+        subprocess.run([
+            "docker", "exec", container_name,
+            "tmux", "send-keys", "-t", "agent",   # name of the existing session
+            f"{container_resurrect_path}/scripts/restore.sh", "Enter"
+        ], check=True)
+    except Exception as e:
+        print(f"Error restoring tmux session in container {container_name}: {e}")
 
 """
 Start a new terminal session.
@@ -108,6 +188,7 @@ def start_terminal():
         et = time.perf_counter()
         print(f"Session created in {(et - st):.2f} seconds")
         rollout_env_id[terminal_id] = rollout_id
+        setup_tmux_res_in_container(container_name=client_container_name)
         return jsonify({"id": terminal_id}), 200
     except Exception as e:
         print(f"Error starting terminal for task {task_name}: {e}")
@@ -212,6 +293,9 @@ def fork_terminal():
         return jsonify({"error": "Terminal not found"}), 404
     task_name = task_paths[terminal_id].input_path.parts[-1]
     client_image_name = terminals[terminal_id]._compose_manager._client_image_name
+    # base_container_name = terminals[terminal_id]._compose_manager._client_container_name
+    # sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=True, max_timeout_sec=5)
+    # save_tmux_session(container_name=base_container_name)
     
     # rollout_id = client_image_name.split('_', 1)[1].replace('_test', '')
     if terminal_id not in rollout_env_id:
@@ -271,7 +355,8 @@ def fork_terminal():
         sessions[new_terminal_id] = new_session
         trial_path[new_terminal_id] = trial_paths  # Use the new trial_paths, not the old one
         task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{path}/{new_task_dir}"))  # Use forked task directory
-
+        # restore_tmux_session(container_name=new_client_container_name)
+        # sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=True, max_timeout_sec=5)
         return jsonify({"id": new_terminal_id}), 200
     except Exception as e:
         print(f"Error forking terminal: {e}")
@@ -464,7 +549,7 @@ def stop_terminal():
     terminal_id = data['id']
 
     if terminal_id not in terminals:
-        print("Terminal not found:", terminal_id)
+        print("Received stop request, but terminal not found:", terminal_id)
         return jsonify({"error": "Terminal not found"}), 404
     
     try:
@@ -485,7 +570,7 @@ def stop_terminal():
             del task_dir_env_id[terminal_id]
         return jsonify({"status": "stopped"}), 200
     except Exception as e:
-        print(f"Error stopping terminal: {e}")
+        print(f" Error stopping terminal: {e}")
         return jsonify({"error": str(e)}), 500
 
 """
@@ -513,7 +598,9 @@ def execute_command():
     
     # TODO: add if blocking
     try:
+        sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=blocking, max_timeout_sec=timeout)
         sessions[terminal_id].send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
+        sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=blocking, max_timeout_sec=timeout)
         return jsonify({"status": "executed"}), 200
     except Exception as e:
         print(f"Error executing command: {e}")
@@ -528,6 +615,21 @@ def get_pane_logs():
         if terminal_id not in sessions:
             return jsonify({"error": "Session not found"}), 404
         pane_output = sessions[terminal_id].capture_pane(capture_entire=True)
+        # print("Captured pane output:", pane_output)
+        # Split by newlines and filter out unwanted lines
+        pane_output = [
+            line for line in pane_output.splitlines()
+            if "scripts/save.sh" not in line 
+            and "scripts/restore.sh" not in line 
+            and "scripts/ps.sh" not in line
+            and "ps: command not found" not in line
+        ]
+        # remove empty lines
+        pane_output = [line for line in pane_output if line.strip() != '']
+        # Replace root@<containerid>: prefix with terminal-bench:
+        pane_output = [re.sub(r'^root@[^:]+:', 'terminal-bench:', line) for line in pane_output]
+        pane_output = "\n".join(pane_output)
+        print("Filtered pane output:", pane_output)
         return jsonify({"logs": pane_output}), 200
     except Exception as e:
         print(f"Error getting pane logs: {e}")
@@ -650,3 +752,12 @@ def hash():
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=9901)
+
+
+### ~/tmux.conf
+# ctrl b ctrl s to save
+# ctrl b ctrl r to restore
+# set -g @resurrect-capture-pane-contents 'on'
+# set -g @resurrect-save-bash-history 'on'
+# run-shell ~/tmux-resurrect/resurrect.tmux
+#
