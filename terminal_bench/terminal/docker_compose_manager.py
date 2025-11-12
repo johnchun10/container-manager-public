@@ -13,6 +13,7 @@ from terminal_bench.utils.env_model import EnvModel
 from terminal_bench.utils.logger import logger
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 class DockerComposeEnvVars(EnvModel):
     task_docker_client_container_name: str | None = None
@@ -97,7 +98,9 @@ class DockerComposeManager:
     ) -> subprocess.CompletedProcess:
         full_command = self.get_docker_compose_command(command)
         self._logger.debug(f"Running docker compose command: {' '.join(full_command)}")
-
+        # print(f"Running docker compose command: {' '.join(full_command)}")
+        # print(f"Environment variables: {self.env}")
+        st = time.perf_counter()
         try:
             result = subprocess.run(
                 full_command,
@@ -106,6 +109,8 @@ class DockerComposeManager:
                 capture_output=True,
                 text=True,
             )
+            et = time.perf_counter()
+            self._logger.debug(f"Docker compose command completed in {et - st:.2f} seconds")
             return result
         except subprocess.CalledProcessError as e:
             self._logger.debug(
@@ -249,7 +254,12 @@ class DockerComposeManager:
             )
             
             print('Number of files changed: {}'.format(len(changed_paths)))
-
+            # print('Changed files: {}'.format(changed_paths))
+            changed_paths.remove('/tmp/tmux-0/default') if '/tmp/tmux-0/default' in changed_paths else None
+            # print('Changed files after removal: {}'.format(changed_paths))
+            if not changed_paths:
+                return "0000"
+            return "1111"
             def hash_file_inside_container(path: str) -> tuple[str, str | None]:
                 """Run sha256sum on the file inside the container."""
                 try:
