@@ -15,19 +15,27 @@ import time
 import random
 import re
 import string
+import threading
 
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
 app = Flask(__name__)
+
+# Global dictionaries
 terminals: Dict[str, Terminal] = {}
 sessions: Dict[str, TmuxSession] = {}
 trial_path: Dict[str, TrialPaths] = {}
 task_paths: Dict[str, TaskPaths] = {}
+rollout_env_id = {}
+task_dir_env_id = {}
+
+# Single lock for all dictionaries
+state_lock = threading.Lock()
+
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
 path = "../tasks"
 container_resurrect_path = "/root/tmux_resurrect"
-rollout_env_id = {}
-task_dir_env_id = {}
+
 
 # @app.route('/env_to_rollout', methods=['POST'])
 # def get_rollout_from_env():
@@ -56,7 +64,12 @@ def setup_tmux_res_in_container(container_name: str):
                 ["docker", "cp", str(local_resurrect_path), f"{container_name}:{container_resurrect_path}"],
                 check=True
             )
-            # update ~/.tmux.conf
+            # docker cp /bin/ps <container>:/usr/local/bin/ps
+        # subprocess.run(
+        #     ["docker", "cp", "/bin/ps", f"{container_name}:/bin/ps"],
+        #     check=True
+        # )
+        # update ~/.tmux.conf
         subprocess.run(
             [
                 "docker", "exec", container_name,
@@ -181,13 +194,14 @@ def start_terminal():
         st = time.perf_counter()
         session = terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
         
-        terminals[terminal_id] = terminal
-        sessions[terminal_id] = session
-        trial_path[terminal_id] = trial_paths
-        task_paths[terminal_id] = TaskPaths(input_path=Path(f"{path}/{task_name}"))
+        with state_lock:
+            terminals[terminal_id] = terminal
+            sessions[terminal_id] = session
+            trial_path[terminal_id] = trial_paths
+            task_paths[terminal_id] = TaskPaths(input_path=Path(f"{path}/{task_name}"))
+            rollout_env_id[terminal_id] = rollout_id
         et = time.perf_counter()
         print(f"Session created in {(et - st):.2f} seconds")
-        rollout_env_id[terminal_id] = rollout_id
         setup_tmux_res_in_container(container_name=client_container_name)
         return jsonify({"id": terminal_id}), 200
     except Exception as e:
@@ -245,12 +259,13 @@ def get_service_name_from_container_name(container_names):
             services_dict[service_name] = original_name
     return services_dict
 def create_forked_task_dir(container_names, task_name, terminal_id):
-    if terminal_id not in task_dir_env_id:
-        print(f"No task directory found for terminal id {terminal_id}, must be first fork")
-        original_task_dir = Path(f"{path}/{task_name}")
-    else:
-        print(f"Using existing task directory for terminal id {terminal_id}")
-        original_task_dir = Path(task_dir_env_id[terminal_id])
+    with state_lock:
+        if terminal_id not in task_dir_env_id:
+            print(f"No task directory found for terminal id {terminal_id}, must be first fork")
+            original_task_dir = Path(f"{path}/{task_name}")
+        else:
+            print(f"Using existing task directory for terminal id {terminal_id}")
+            original_task_dir = Path(task_dir_env_id[terminal_id])
     # random 6 char string
     random_string = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
     new_task_dir = Path(f"{path}/{task_name}_{random_string}")
@@ -288,20 +303,23 @@ def fork_terminal():
     #     new_rollout_id = str(uuid.uuid4())
     # else:
     #     new_rollout_id = data["rollout_id"]
-    if terminal_id not in terminals:
-        print("Terminal not found:", terminal_id)
-        return jsonify({"error": "Terminal not found"}), 404
-    task_name = task_paths[terminal_id].input_path.parts[-1]
-    client_image_name = terminals[terminal_id]._compose_manager._client_image_name
+    
+    with state_lock:
+        if terminal_id not in terminals:
+            print("Terminal not found:", terminal_id)
+            return jsonify({"error": "Terminal not found"}), 404
+        client_image_name = terminals[terminal_id]._compose_manager._client_image_name
+        task_name = task_paths[terminal_id].input_path.parts[-1]
+        if terminal_id not in rollout_env_id:
+            print("Rollout ID not found for terminal:", terminal_id)
+            return jsonify({"error": "Rollout ID not found for terminal"}), 404
+        rollout_id = rollout_env_id[terminal_id]
+    
     # base_container_name = terminals[terminal_id]._compose_manager._client_container_name
     # sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=True, max_timeout_sec=5)
     # save_tmux_session(container_name=base_container_name)
     
     # rollout_id = client_image_name.split('_', 1)[1].replace('_test', '')
-    if terminal_id not in rollout_env_id:
-        print("Rollout ID not found for terminal:", terminal_id)
-        return jsonify({"error": "Rollout ID not found for terminal"}), 404
-    rollout_id = rollout_env_id[terminal_id]
     print("Rolling out from rollout id:", rollout_id)
 
     container_names = get_all_container_by_id(rollout_id)
@@ -349,12 +367,14 @@ def fork_terminal():
         new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
         print("created new session successfully")
         new_terminal_id = str(uuid.uuid4())
-        task_dir_env_id[new_terminal_id] = str(new_task_dir)
-        rollout_env_id[new_terminal_id] = new_rollout_id
-        terminals[new_terminal_id] = new_terminal
-        sessions[new_terminal_id] = new_session
-        trial_path[new_terminal_id] = trial_paths  # Use the new trial_paths, not the old one
-        task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{path}/{new_task_dir}"))  # Use forked task directory
+        
+        with state_lock:
+            task_dir_env_id[new_terminal_id] = str(new_task_dir)
+            rollout_env_id[new_terminal_id] = new_rollout_id
+            terminals[new_terminal_id] = new_terminal
+            sessions[new_terminal_id] = new_session
+            trial_path[new_terminal_id] = trial_paths  # Use the new trial_paths, not the old one
+            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{path}/{new_task_dir}"))  # Use forked task directory
         # restore_tmux_session(container_name=new_client_container_name)
         # sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=True, max_timeout_sec=5)
         return jsonify({"id": new_terminal_id}), 200
@@ -436,17 +456,15 @@ def fork_terminal_checkpoint():
     terminal_id = data['id']
     new_rollout_id = str(uuid.uuid4())
     
-    if terminal_id not in terminals:
-        print("Terminal not found:", terminal_id)
-        return jsonify({"error": "Terminal not found"}), 404
-    
-    task_name = task_paths[terminal_id].input_path.parts[-1]
-    
-    if terminal_id not in rollout_env_id:
-        print("Rollout ID not found for terminal:", terminal_id)
-        return jsonify({"error": "Rollout ID not found for terminal"}), 404
-    
-    rollout_id = rollout_env_id[terminal_id]
+    with state_lock:
+        if terminal_id not in terminals:
+            print("Terminal not found:", terminal_id)
+            return jsonify({"error": "Terminal not found"}), 404
+        task_name = task_paths[terminal_id].input_path.parts[-1]
+        if terminal_id not in rollout_env_id:
+            print("Rollout ID not found for terminal:", terminal_id)
+            return jsonify({"error": "Rollout ID not found for terminal"}), 404
+        rollout_id = rollout_env_id[terminal_id]
     print(f"Creating checkpoint from rollout id: {rollout_id}")
 
     # Get all container names for this rollout
@@ -476,7 +494,10 @@ def fork_terminal_checkpoint():
         delete_checkpoint(checkpoint_map)
         
         # Create trial paths for logging
-        client_image_name = terminals[terminal_id]._compose_manager._client_image_name.replace(rollout_id, new_rollout_id)
+        with state_lock:
+            client_image_name = terminals[terminal_id]._compose_manager._client_image_name.replace(rollout_id, new_rollout_id)
+            original_task_path = task_paths[terminal_id].input_path
+        
         trial_paths = TrialPaths(
             Path(f'../runs/{client_image_name}'), 
             task_name, 
@@ -486,7 +507,6 @@ def fork_terminal_checkpoint():
         
         # For checkpoint-based fork, we use the original task path since containers are already running
         # with their filesystem state intact from the checkpoint
-        original_task_path = task_paths[terminal_id].input_path
         
         # Create a new terminal object that manages the restored containers
         # Note: This terminal object is mainly for session management since containers are already running
@@ -519,11 +539,12 @@ def fork_terminal_checkpoint():
         
         # Register the new terminal
         new_terminal_id = str(uuid.uuid4())
-        rollout_env_id[new_terminal_id] = new_rollout_id
-        terminals[new_terminal_id] = new_terminal
-        sessions[new_terminal_id] = new_session
-        trial_path[new_terminal_id] = trial_paths
-        task_paths[new_terminal_id] = TaskPaths(input_path=original_task_path)
+        with state_lock:
+            rollout_env_id[new_terminal_id] = new_rollout_id
+            terminals[new_terminal_id] = new_terminal
+            sessions[new_terminal_id] = new_session
+            trial_path[new_terminal_id] = trial_paths
+            task_paths[new_terminal_id] = TaskPaths(input_path=original_task_path)
         # Note: We don't set task_dir_env_id for checkpoint-based forks since we use the original task directory
         
         print(f"Successfully forked terminal using checkpoint. New terminal ID: {new_terminal_id}")
@@ -548,26 +569,30 @@ def stop_terminal():
     data = request.json
     terminal_id = data['id']
 
-    if terminal_id not in terminals:
-        print("Received stop request, but terminal not found:", terminal_id)
-        return jsonify({"error": "Terminal not found"}), 404
+    with state_lock:
+        if terminal_id not in terminals:
+            print("Received stop request, but terminal not found:", terminal_id)
+            return jsonify({"error": "Terminal not found"}), 404
+        terminal = terminals[terminal_id]
     
     try:
-        terminals[terminal_id].stop()
-        del terminals[terminal_id]
-        del sessions[terminal_id]
-        if terminal_id in trial_path:
-            del trial_path[terminal_id]
-        if terminal_id in task_paths:
-            del task_paths[terminal_id]
-        if terminal_id in rollout_env_id:
-            del rollout_env_id[terminal_id]
-        if terminal_id in task_dir_env_id:
-            # remove the forked task directory
-            forked_task_dir = Path(task_dir_env_id[terminal_id])
-            if forked_task_dir.exists():
-                subprocess.run(['rm', '-r', str(forked_task_dir)])
-            del task_dir_env_id[terminal_id]
+        terminal.stop()
+        
+        with state_lock:
+            del terminals[terminal_id]
+            del sessions[terminal_id]
+            if terminal_id in trial_path:
+                del trial_path[terminal_id]
+            if terminal_id in task_paths:
+                del task_paths[terminal_id]
+            if terminal_id in rollout_env_id:
+                del rollout_env_id[terminal_id]
+            if terminal_id in task_dir_env_id:
+                # remove the forked task directory
+                forked_task_dir = Path(task_dir_env_id[terminal_id])
+                if forked_task_dir.exists():
+                    subprocess.run(['rm', '-r', str(forked_task_dir)])
+                del task_dir_env_id[terminal_id]
         return jsonify({"status": "stopped"}), 200
     except Exception as e:
         print(f" Error stopping terminal: {e}")
@@ -593,14 +618,16 @@ def execute_command():
     blocking = data['blocking']
     timeout = data['timeout']
     
-    if terminal_id not in sessions:
-        return jsonify({"error": "Session not found"}), 404
+    with state_lock:
+        if terminal_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+        session = sessions[terminal_id]
     
     # TODO: add if blocking
     try:
-        sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=blocking, max_timeout_sec=timeout)
-        sessions[terminal_id].send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
-        sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=blocking, max_timeout_sec=timeout)
+        session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=True, max_timeout_sec=2, min_timeout_sec=1)
+        session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
+        session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=True, max_timeout_sec=2, min_timeout_sec=1)
         return jsonify({"status": "executed"}), 200
     except Exception as e:
         print(f"Error executing command: {e}")
@@ -612,9 +639,11 @@ def get_pane_logs():
     terminal_id = data['id']
     
     try:
-        if terminal_id not in sessions:
-            return jsonify({"error": "Session not found"}), 404
-        pane_output = sessions[terminal_id].capture_pane(capture_entire=True)
+        with state_lock:
+            if terminal_id not in sessions:
+                return jsonify({"error": "Session not found"}), 404
+            session = sessions[terminal_id]
+        pane_output = session.capture_pane(capture_entire=True)
         # print("Captured pane output:", pane_output)
         # Split by newlines and filter out unwanted lines
         pane_output = [
@@ -627,7 +656,7 @@ def get_pane_logs():
         # remove empty lines
         pane_output = [line for line in pane_output if line.strip() != '']
         # Replace root@<containerid>: prefix with terminal-bench:
-        pane_output = [re.sub(r'^root@[^:]+:', 'terminal-bench:', line) for line in pane_output]
+        pane_output = [re.sub(r'^root@[^:]+:', 'root@terminal:', line) for line in pane_output]
         pane_output = "\n".join(pane_output)
         print("Filtered pane output:", pane_output)
         return jsonify({"logs": pane_output}), 200
@@ -640,12 +669,12 @@ def run_tests():
     data = request.json
     terminal_id = data['id']
 
-    if terminal_id not in sessions:
-        return jsonify({"error": "trying to test a non-existent session"}), 404
-    
-    task_path = task_paths[terminal_id]
-    terminal = terminals[terminal_id]
-    session = sessions[terminal_id]
+    with state_lock:
+        if terminal_id not in sessions:
+            return jsonify({"error": "trying to test a non-existent session"}), 404
+        session = sessions[terminal_id]
+        task_path = task_paths[terminal_id]
+        terminal = terminals[terminal_id]
 
     # setup the environment to run tests
     try:
@@ -693,8 +722,10 @@ def run_tests():
 def solve():
     data = request.json
     terminal_id = data['id']
-    solution_path = task_paths[terminal_id].solution_path
-    session = sessions[terminal_id]
+    
+    with state_lock:
+        solution_path = task_paths[terminal_id].solution_path
+        session = sessions[terminal_id]
 
     if solution_path.suffix == ".sh":
         solution = {
@@ -740,14 +771,17 @@ def hash():
     data = request.json
     terminal_id = data['id']
 
-    if terminal_id in terminals:
-        try:
-            return jsonify({'hash': terminals[terminal_id].get_hash()})
-        except Exception as e:
-            print(f"Error getting hash for terminal {terminal_id}: {e}")
-            return jsonify({'hash': 'error'})
-
-    return jsonify({'error': 'Terminal with id {} not found'.format(terminal_id)})
+    with state_lock:
+        if terminal_id in terminals:
+            terminal = terminals[terminal_id]
+        else:
+            return jsonify({'error': 'Terminal with id {} not found'.format(terminal_id)})
+    
+    try:
+        return jsonify({'hash': terminal.get_hash()})
+    except Exception as e:
+        print(f"Error getting hash for terminal {terminal_id}: {e}")
+        return jsonify({'hash': 'error'})
 
 
 if __name__ == '__main__':

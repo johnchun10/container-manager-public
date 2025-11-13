@@ -33,6 +33,20 @@ class TerminalBenchServerClient:
         response.raise_for_status()
         new_terminal_id = response.json()["id"]
         return new_terminal_id
+
+
+    def checkpoint(self, terminal_id: Optional[str] = None) -> str:
+        tid = terminal_id or self.terminal_id
+        if not tid:
+            raise ValueError("No terminal_id provided")
+        
+        response = requests.post(
+            f"{self.base_url}/fork_checkpoint",
+            json={"id": tid}
+        )
+        response.raise_for_status()
+        checkpoint_id = response.json()["id"]
+        return checkpoint_id
     
     def stop(self, terminal_id: Optional[str] = None) -> Dict[str, Any]:
         tid = terminal_id or self.terminal_id
@@ -124,6 +138,7 @@ def run_task(task_name: str, tasks_dir: str) -> Dict[str, Any]:
         et = time.perf_counter()
         starting_duration = et - st
         print(f"Terminal started with ID: {terminal_id} for task: {task_name} in {(et - st):.2f} seconds")
+        time.sleep(300)
         # st = time.perf_counter()
         # client.solve(terminal_id)
         # et = time.perf_counter()
@@ -143,14 +158,23 @@ def run_task(task_name: str, tasks_dir: str) -> Dict[str, Any]:
         # hash_val = client.hash(new_terminal_id)
         # et = time.perf_counter()
         # print(f"Task {task_name}'s hash is {hash_val} took {(et - st):.2f} seconds to compute")
-        new_rollout_id = str(uuid.uuid4())
+
         st = time.perf_counter()
         new_terminal_id = client.fork(terminal_id)
         et = time.perf_counter()
         duration = et - st
         print(f"Forked terminal with ID: {new_terminal_id} in {duration:.2f} seconds")
-        client.solve(new_terminal_id)
-        client.test(new_terminal_id)
+
+        # st = time.perf_counter()
+        # new_terminal_id = client.fork(terminal_id)
+        # et = time.perf_counter()
+        # duration = et - st
+        # print(f"checkpointed terminal with ID: {new_terminal_id} in {duration:.2f} seconds")
+
+        print(f"hash of original terminal: {client.hash(terminal_id)}")
+        print(f"hash of forked terminal: {client.hash(new_terminal_id)}")
+        # client.solve(new_terminal_id)
+        # client.test(new_terminal_id)
         # forked the new terminal
 
         # another_new_tid = client.fork(terminal_id)
@@ -160,7 +184,7 @@ def run_task(task_name: str, tasks_dir: str) -> Dict[str, Any]:
         client.stop(new_terminal_id)
         client.stop(terminal_id)
 
-        print(f"Stopped forked terminal with ID: {new_terminal_id}")
+        # print(f"Stopped forked terminal with ID: {new_terminal_id}")
         
 
         # st = time.perf_counter()
@@ -263,6 +287,7 @@ if __name__ == "__main__":
     # choose random 1 task
     import random
     task_names = [random.choice(task_names)]
+    task_names = ["hello-world"]
     # task_names = ["07b42fd_1"]
     print(f"Found {len(task_names)} tasks: {task_names}\n")
     
@@ -272,7 +297,7 @@ if __name__ == "__main__":
     # run_task(task_name, tasks_dir)
 
     # task_names = ["postgres-csv-clean"]
-    # task_names = [task_names[0]]
+    # task_names = ["hello-world"]
     
     results = []
 
