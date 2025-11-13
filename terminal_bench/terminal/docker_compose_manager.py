@@ -255,7 +255,14 @@ class DockerComposeManager:
             
             print('Number of files changed: {}'.format(len(changed_paths)))
             # print('Changed files: {}'.format(changed_paths))
-            changed_paths.remove('/tmp/tmux-0/default') if '/tmp/tmux-0/default' in changed_paths else None
+            
+            # Filter out paths we want to ignore
+            # Remove all files under /root/tmux_resurrect directory
+            changed_paths = [
+                p for p in changed_paths 
+                if not p.startswith('/root/tmux_resurrect')
+                and p not in ['/root', '/root/.bash_history', '/tmp', '/tmp/tmux-0', '/tmp/tmux-0/default']
+            ]
             # print('Changed files after removal: {}'.format(changed_paths))
             if not changed_paths:
                 return "0000"
