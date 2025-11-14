@@ -8,7 +8,7 @@ import uuid
 import json
 
 class TerminalBenchServerClient:
-    def __init__(self, base_url: str = "http://localhost:9901"):
+    def __init__(self, base_url: str = "http://localhost:9909"):
         self.base_url = base_url
         self.terminal_id: Optional[str] = None
     
@@ -138,7 +138,6 @@ def run_task(task_name: str, tasks_dir: str) -> Dict[str, Any]:
         et = time.perf_counter()
         starting_duration = et - st
         print(f"Terminal started with ID: {terminal_id} for task: {task_name} in {(et - st):.2f} seconds")
-        time.sleep(300)
         # st = time.perf_counter()
         # client.solve(terminal_id)
         # et = time.perf_counter()
@@ -160,28 +159,24 @@ def run_task(task_name: str, tasks_dir: str) -> Dict[str, Any]:
         # print(f"Task {task_name}'s hash is {hash_val} took {(et - st):.2f} seconds to compute")
 
         st = time.perf_counter()
-        new_terminal_id = client.fork(terminal_id)
+        # new_terminal_id = client.fork(terminal_id)
+        new_terminal_id = "nothing"
         et = time.perf_counter()
         duration = et - st
         print(f"Forked terminal with ID: {new_terminal_id} in {duration:.2f} seconds")
-
-        # st = time.perf_counter()
-        # new_terminal_id = client.fork(terminal_id)
-        # et = time.perf_counter()
-        # duration = et - st
-        # print(f"checkpointed terminal with ID: {new_terminal_id} in {duration:.2f} seconds")
-
-        print(f"hash of original terminal: {client.hash(terminal_id)}")
-        print(f"hash of forked terminal: {client.hash(new_terminal_id)}")
         # client.solve(new_terminal_id)
-        # client.test(new_terminal_id)
+
+        client.execute(command="git clone https://github.com/reactor/reactor-core\n", blocking=True, timeout=30, terminal_id=terminal_id)
+        print(client.get_logs())
+
+        print(client.test(terminal_id))
         # forked the new terminal
 
         # another_new_tid = client.fork(terminal_id)
 
         # print(f"Forked again terminal with ID: {another_new_tid}")
         # client.stop(another_new_tid)
-        client.stop(new_terminal_id)
+        # client.stop(new_terminal_id)
         client.stop(terminal_id)
 
         # print(f"Stopped forked terminal with ID: {new_terminal_id}")
@@ -277,7 +272,7 @@ def test_task(task_name: str, tasks_dir: str) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     # tasks_dir = '/home/bk478/susRL/tv-cache/data/appworld-train'
-    tasks_dir = '../tasks'
+    tasks_dir = '../env_bench/tasks'
     max_workers = 1
     
     task_names = [d for d in os.listdir(tasks_dir) 
@@ -287,7 +282,6 @@ if __name__ == "__main__":
     # choose random 1 task
     import random
     task_names = [random.choice(task_names)]
-    task_names = ["hello-world"]
     # task_names = ["07b42fd_1"]
     print(f"Found {len(task_names)} tasks: {task_names}\n")
     

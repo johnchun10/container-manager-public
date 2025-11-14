@@ -16,6 +16,7 @@ import random
 import re
 import string
 import threading
+import os
 
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
@@ -26,14 +27,13 @@ terminals: Dict[str, Terminal] = {}
 sessions: Dict[str, TmuxSession] = {}
 trial_path: Dict[str, TrialPaths] = {}
 task_paths: Dict[str, TaskPaths] = {}
+# path = "/home/bk478/susRL/tv-cache/data/appworld-train"
+path = "../env_bench/tasks"
 rollout_env_id = {}
 task_dir_env_id = {}
 
 # Single lock for all dictionaries
 state_lock = threading.Lock()
-
-# path = "/home/bk478/susRL/tv-cache/data/appworld-train"
-path = "../tasks"
 container_resurrect_path = "/root/tmux_resurrect"
 
 
@@ -59,7 +59,7 @@ def setup_tmux_res_in_container(container_name: str):
     """Copy the tmux resurrect files to the specified container."""
     # /home/bk478/susRL/tv-cache/rlhf-container-manager/rlhf_server/tmux-res
     try: 
-        local_resurrect_path = "/home/bk478/susRL/tv-cache/rlhf-container-manager/rlhf_server/tmux-res"
+        local_resurrect_path = "/home/av565/tvcache/rlhf-container-manager/rlhf_server/tmux-resurrect-master"
         subprocess.run(
                 ["docker", "cp", str(local_resurrect_path), f"{container_name}:{container_resurrect_path}"],
                 check=True
@@ -785,13 +785,4 @@ def hash():
 
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=9901)
-
-
-### ~/tmux.conf
-# ctrl b ctrl s to save
-# ctrl b ctrl r to restore
-# set -g @resurrect-capture-pane-contents 'on'
-# set -g @resurrect-save-bash-history 'on'
-# run-shell ~/tmux-resurrect/resurrect.tmux
-#
+    app.run(debug=False, host='0.0.0.0', port=9909)

@@ -1,6 +1,6 @@
 import re
 from enum import Enum
-
+import os
 from terminal_bench.parsers.base_parser import BaseParser, UnitTestStatus
 
 
@@ -79,6 +79,58 @@ class PytestParser(BaseParser):
 
         return results
 
+    def extract_issues_count(self, text: str):
+        """
+        Extract issues_count from text containing a JSON block after 'Gradle project detected'.
+        
+        Args:
+            text: String containing the output text with JSON
+            
+        Returns:
+            int: The issues_count value, or None if not found
+        """
+        # Find the marker text
+        marker = "Gradle project detected"
+        marker_index = text.find(marker)
+        
+        if marker_index == -1:
+            return None
+        
+        # Start searching for JSON after the marker
+        search_start = marker_index + len(marker)
+        
+        # Find the opening brace of the JSON object
+        json_start = text.find("{", search_start)
+        if json_start == -1:
+            return None
+        
+        # Find the matching closing brace
+        brace_count = 0
+        json_end = -1
+        
+        for i in range(json_start, len(text)):
+            if text[i] == "{":
+                brace_count += 1
+            elif text[i] == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        
+        if json_end == -1:
+            return None
+        
+        # Extract the JSON string
+        json_str = text[json_start:json_end]
+        
+        # Parse the JSON
+        import json
+        try:
+            data = json.loads(json_str)
+            return data.get("issues_count")
+        except json.JSONDecodeError:
+            return None
+
     def parse(self, content: str) -> dict[str, UnitTestStatus]:
         parts = re.split(
             pattern=self.SHORT_TEST_SUMMARY_INFO_PATTERN,
@@ -86,6 +138,18 @@ class PytestParser(BaseParser):
             flags=re.IGNORECASE,
             maxsplit=1,
         )
+
+        print(content)
+        if int(os.environ.get('ENV_BENCH', 0)) == 1:
+            print('Using ENV bench')
+            try:
+                if self.extract_issues_count(content) > 0:
+                    return {'SCRIPT': PytestTestStatus.FAILED.to_test_status()}
+                else:
+                    return {'SCRIPT': PytestTestStatus.PASSED.to_test_status()}
+            except Exception as e:
+                print(f'Error while parsing ENV bench test results, so returning failure')
+                return {'SCRIPT': PytestTestStatus.FAILED.to_test_status()}
 
         if len(parts) < 2:
             raise ValueError(

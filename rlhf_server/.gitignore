@@ -1,1 +1,3 @@
 *.log
+tmux-resurrect-master
+terminal_bench_results.json
