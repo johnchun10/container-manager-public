@@ -33,18 +33,20 @@ instruction: |-
         not from an external source.
 
     A short example of how you might investigate and carry out setup steps (this is purely illustrative):
-    - Clone the repository using `git clone https://github.com/geysermc/geyser.git`
-    - Go into the cloned directory and reset the repository to the commit a8bd93a075b17bd7d008465ba47353a086869ce8"}
+    - Clone the repository using `git clone url`
+    - Go into the cloned directory.
+    - Reset the repository to the given commit id.
     - Use `ls` to explore files and folders in the working directory.
     - Notice there is a `README.md` file, so you run `cat README.md` to read the setup instructions.
     - Those instructions might say, for example, "Run `mvn compile` to build the project and install additional system-level packages 
       for specific plugins via `apt-get`: openjdk-17-jdk maven gradle".
     - Next, you would run these commands step by step, verifying each completes successfully.
 
-    You are operating in a Docker container with Java and the necessary system utilities. 
-    For your reference, the Dockerfile used is:
-    ```
-        FROM ubuntu:22.04
+      For reference, here is the dockerfile of the container you are operating in. 
+      =================
+      BEGIN DOCKER FILE
+      =================
+          FROM ubuntu:22.04
     
     # Set environment variables for non-interactive installs
     ENV DEBIAN_FRONTEND=noninteractive
@@ -135,17 +137,32 @@ instruction: |-
     
     # Create a working directory
     WORKDIR /app
-    ```
+      =================
+      END DOCKER FILE
+      =================
 
-    Remember:
-    - You must execute all intermediate steps (installing packages, setting up the environment, etc.) via the provided Bash terminal, 
-      within the repository root.
-    - Only provide your concluding response without a tool call once you are confident the job is finished 
-      (all dependencies installed, JVM environment properly configured, and the repository ready to build).
+      You have complete access to read, write, update, and delete files on this container.
 
-    Now, follow the instructions to setup the repository available at https://github.com/geysermc/geyser.git at the commit a8bd93a075b17bd7d008465ba47353a086869ce8.
-author_name: Alex Shaw
-author_email: alexgshaw64@gmail.com
+      CURRENT TERMINAL STATE:
+      {terminal_state}
+
+      RESPONSE FORMAT:
+      Your response must be a JSON object that matches this schema:
+      {response_schema}
+
+      CRITICAL: Respond ONLY with JSON in the given schema. Do not include markdown formatting.
+
+      REMEMBER:
+         - You must execute all intermediate steps (installing packages, setting up the environment, etc.) via the provided Bash terminal, 
+            within the repository root.
+         - Only provide your concluding response without a tool call once you are confident the job is finished 
+            (all dependencies installed, JVM environment properly configured, and the repository ready to build).
+         - Include 1 bash command per entry in the command batch.
+
+      YOUR TASK INSTRUCTION:
+      Now, follow the instructions to setup the repository available at https://github.com/geysermc/geyser.git at the commit a8bd93a075b17bd7d008465ba47353a086869ce8
+author_name: Env_bench
+author_email: test@test.com
 difficulty: easy
 category: file-operations
 tags:
