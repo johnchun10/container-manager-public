@@ -31,9 +31,14 @@ task_paths: Dict[str, TaskPaths] = {}
 path = "../env_bench/tasks"
 rollout_env_id = {}
 task_dir_env_id = {}
+terminal_state_dict = {}
 
 # Single lock for all dictionaries
 state_lock = threading.Lock()
+fork_save_lock = threading.Lock()
+
+# path = "/home/bk478/susRL/tv-cache/data/appworld-train"
+path = "../tasks"
 container_resurrect_path = "/root/tmux_resurrect"
 
 
@@ -242,7 +247,7 @@ def delete_committed_images(image_names: list[str]):
             return commit_result
         commit_results.append(commit_result)
     return None
-#container names are image names
+
 def get_service_name_from_container_name(container_names):
     # postgres-csv-clean_0f3e208d-dfdc-45cf-96c6-4a45c8424593_test_container-db-1
     #
@@ -258,6 +263,7 @@ def get_service_name_from_container_name(container_names):
             service_name = parts[-1].split('-')[1]
             services_dict[service_name] = original_name
     return services_dict
+
 def create_forked_task_dir(container_names, task_name, terminal_id):
     with state_lock:
         if terminal_id not in task_dir_env_id:
@@ -266,7 +272,7 @@ def create_forked_task_dir(container_names, task_name, terminal_id):
         else:
             print(f"Using existing task directory for terminal id {terminal_id}")
             original_task_dir = Path(task_dir_env_id[terminal_id])
-    # random 6 char string
+
     random_string = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
     new_task_dir = Path(f"{path}/{task_name}_{random_string}")
     if new_task_dir.exists():
@@ -285,7 +291,6 @@ def create_forked_task_dir(container_names, task_name, terminal_id):
         else:
             values["image"] = service_names_dict['main']
 
-    # remove the build section if exists
         if 'build' in values:
             del values['build']
     with open(docker_compose_path, 'w') as f:
@@ -299,11 +304,6 @@ def fork_terminal():
         return jsonify({"error": "No terminal id provided"}), 400
     terminal_id = data['id']
     new_rollout_id = str(uuid.uuid4())
-    # if 'rollout_id' not in data:
-    #     new_rollout_id = str(uuid.uuid4())
-    # else:
-    #     new_rollout_id = data["rollout_id"]
-    
     with state_lock:
         if terminal_id not in terminals:
             print("Terminal not found:", terminal_id)
@@ -315,23 +315,18 @@ def fork_terminal():
             return jsonify({"error": "Rollout ID not found for terminal"}), 404
         rollout_id = rollout_env_id[terminal_id]
     
-    # base_container_name = terminals[terminal_id]._compose_manager._client_container_name
-    # sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=True, max_timeout_sec=5)
-    # save_tmux_session(container_name=base_container_name)
-    
-    # rollout_id = client_image_name.split('_', 1)[1].replace('_test', '')
     print("Rolling out from rollout id:", rollout_id)
 
     container_names = get_all_container_by_id(rollout_id)
     print("Container names:", container_names)
-    image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
+    with fork_save_lock:
+        image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
     print("Committed forked image names:", image_names)
     if commit_error:
         return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
     new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
 
     client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
-    # start a new terminal with the new task dir
     docker_compose_path = new_task_dir / 'docker-compose.yaml'
     new_client_image_name = f'{client_image_name}'
     new_client_container_name = f'{new_client_image_name}_container'
@@ -355,14 +350,10 @@ def fork_terminal():
             disable_recording=False,
         )
         new_terminal.start()
-        # print("deleting image names: ", image_names)
         del_result = delete_committed_images(image_names)
         if del_result:
             print(f"Error deleting images: {del_result.stderr}")
         print("deleted committed images successfully")
-        # remove new directory
-        # subprocess.run(['rm', '-r', str(new_task_dir)])
-        
         print(f"list of running containers {image_names}")
         new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
         print("created new session successfully")
@@ -373,188 +364,11 @@ def fork_terminal():
             rollout_env_id[new_terminal_id] = new_rollout_id
             terminals[new_terminal_id] = new_terminal
             sessions[new_terminal_id] = new_session
-            trial_path[new_terminal_id] = trial_paths  # Use the new trial_paths, not the old one
-            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{path}/{new_task_dir}"))  # Use forked task directory
-        # restore_tmux_session(container_name=new_client_container_name)
-        # sessions[terminal_id].send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=True, max_timeout_sec=5)
+            trial_path[new_terminal_id] = trial_paths 
+            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{path}/{new_task_dir}"))  
         return jsonify({"id": new_terminal_id}), 200
     except Exception as e:
         print(f"Error forking terminal: {e}")
-        return jsonify({"error": str(e)}), 500
-
-def checkpoint_containers(container_names: list[str], old_rollout_id: str, new_rollout_id: str):
-    """Create checkpoints for all containers with unique checkpoint names per container.
-    
-    Checkpoint names follow the same pattern as container names: replace old_rollout_id with new_rollout_id.
-    This keeps checkpoint names clean and consistent.
-    """
-    checkpoint_map = {}  # Maps container_name -> checkpoint_name
-    checkpoint_results = []
-    
-    for container_name in container_names:
-        # Create checkpoint name by replacing rollout ID, similar to how we handle container/image names
-        checkpoint_name = container_name.replace(old_rollout_id, new_rollout_id)
-        
-        # Docker checkpoint requires CRIU and experimental features enabled
-        checkpoint_result = subprocess.run(
-            ['docker', 'checkpoint', 'create', container_name, checkpoint_name],
-            capture_output=True, text=True
-        )
-        if checkpoint_result.returncode != 0:
-            # Clean up any checkpoints created before the failure
-            for prev_container, prev_checkpoint in checkpoint_map.items():
-                subprocess.run(
-                    ['docker', 'checkpoint', 'rm', prev_container, prev_checkpoint],
-                    capture_output=True, text=True
-                )
-            return None, None, checkpoint_result
-        
-        checkpoint_map[container_name] = checkpoint_name
-        checkpoint_results.append(checkpoint_result)
-    
-    return checkpoint_results, checkpoint_map, None
-
-def restore_containers_from_checkpoint(container_names: list[str], checkpoint_map: dict):
-    """Restore containers from checkpoint with new names.
-    
-    Since checkpoint_name = new_container_name (both use new_rollout_id), 
-    we can directly restore with a single name.
-    """
-    restored_containers = []
-    
-    for container_name in container_names:
-        # Both checkpoint name and new container name use new_rollout_id
-        checkpoint_name = checkpoint_map[container_name]
-        
-        # Start the container from checkpoint - name is used for both checkpoint and container
-        restore_result = subprocess.run(
-            ['docker', 'start', '--checkpoint', checkpoint_name, checkpoint_name],
-            capture_output=True, text=True
-        )
-        if restore_result.returncode != 0:
-            return None, restore_result
-
-        restored_containers.append(checkpoint_name)
-
-    return restored_containers, None
-
-def delete_checkpoint(checkpoint_map: dict):
-    """Delete checkpoints for all containers using the checkpoint map."""
-    for container_name, checkpoint_name in checkpoint_map.items():
-        subprocess.run(
-            ['docker', 'checkpoint', 'rm', container_name, checkpoint_name],
-            capture_output=True, text=True
-        )
-
-@app.route('/fork_checkpoint', methods=['POST'])
-def fork_terminal_checkpoint():
-    """Fork a terminal session using Docker checkpoint instead of commit."""
-    data = request.json
-    if "id" not in data:
-        return jsonify({"error": "No terminal id provided"}), 400
-    
-    terminal_id = data['id']
-    new_rollout_id = str(uuid.uuid4())
-    
-    with state_lock:
-        if terminal_id not in terminals:
-            print("Terminal not found:", terminal_id)
-            return jsonify({"error": "Terminal not found"}), 404
-        task_name = task_paths[terminal_id].input_path.parts[-1]
-        if terminal_id not in rollout_env_id:
-            print("Rollout ID not found for terminal:", terminal_id)
-            return jsonify({"error": "Rollout ID not found for terminal"}), 404
-        rollout_id = rollout_env_id[terminal_id]
-    print(f"Creating checkpoint from rollout id: {rollout_id}")
-
-    # Get all container names for this rollout
-    container_names = get_all_container_by_id(rollout_id)
-    print(f"Container names to checkpoint: {container_names}")
-    
-    # Create checkpoints for all containers (each gets a unique checkpoint name by replacing rollout ID)
-    checkpoint_results, checkpoint_map, checkpoint_error = checkpoint_containers(container_names, rollout_id, new_rollout_id)
-    if checkpoint_error:
-        return jsonify({"error": f"Failed to checkpoint containers: {checkpoint_error.stderr}"}), 500
-    print(f"Successfully created checkpoints: {checkpoint_map}")
-    
-    try:
-        # Restore containers from checkpoint with new names
-        # Note: Checkpoints are self-sufficient and contain the entire container state,
-        # so we don't need to copy task directories or modify docker-compose files
-        restored_containers, restore_error = restore_containers_from_checkpoint(
-            container_names,  checkpoint_map
-        )
-        if restore_error:
-            delete_checkpoint(checkpoint_map)
-            return jsonify({"error": f"Failed to restore containers: {restore_error.stderr}"}), 500
-        
-        print(f"Successfully restored containers from checkpoint: {restored_containers}")
-        
-        # Clean up checkpoints after successful restore
-        delete_checkpoint(checkpoint_map)
-        
-        # Create trial paths for logging
-        with state_lock:
-            client_image_name = terminals[terminal_id]._compose_manager._client_image_name.replace(rollout_id, new_rollout_id)
-            original_task_path = task_paths[terminal_id].input_path
-        
-        trial_paths = TrialPaths(
-            Path(f'../runs/{client_image_name}'), 
-            task_name, 
-            f'trial_{new_rollout_id}'
-        )
-        trial_paths.mkdir()
-        
-        # For checkpoint-based fork, we use the original task path since containers are already running
-        # with their filesystem state intact from the checkpoint
-        
-        # Create a new terminal object that manages the restored containers
-        # Note: This terminal object is mainly for session management since containers are already running
-        new_client_container_name = f'{client_image_name}_container'
-        docker_image_name_prefix = f'{client_image_name}_docker'
-        
-        # Use the original docker-compose path since containers are already restored
-        original_docker_compose_path = Path(f"{original_task_path}/docker-compose.yaml")
-        
-        new_terminal = Terminal(
-            client_container_name=new_client_container_name,
-            client_image_name=client_image_name,
-            docker_image_name_prefix=docker_image_name_prefix,
-            docker_compose_path=original_docker_compose_path,
-            sessions_logs_path=trial_paths.sessions_path,
-            agent_logs_path=trial_paths.agent_logging_dir,
-            commands_path=trial_paths.commands_path,
-            no_rebuild=True,  # Don't rebuild, containers are already running from checkpoint
-            cleanup=True,
-            livestream=False,
-            disable_recording=False,
-        )
-        
-        # Attach to the restored containers
-        new_session = new_terminal.create_session(
-            session_name="agent", 
-            is_active_stream=False, 
-            as_configured_user=True
-        )
-        
-        # Register the new terminal
-        new_terminal_id = str(uuid.uuid4())
-        with state_lock:
-            rollout_env_id[new_terminal_id] = new_rollout_id
-            terminals[new_terminal_id] = new_terminal
-            sessions[new_terminal_id] = new_session
-            trial_path[new_terminal_id] = trial_paths
-            task_paths[new_terminal_id] = TaskPaths(input_path=original_task_path)
-        # Note: We don't set task_dir_env_id for checkpoint-based forks since we use the original task directory
-        
-        print(f"Successfully forked terminal using checkpoint. New terminal ID: {new_terminal_id}")
-        return jsonify({"id": new_terminal_id}), 200
-        
-    except Exception as e:
-        print(f"Error forking terminal with checkpoint: {e}")
-        # Clean up on error
-        if 'checkpoint_map' in locals():
-            delete_checkpoint(checkpoint_map)
         return jsonify({"error": str(e)}), 500
 
 """
@@ -588,7 +402,6 @@ def stop_terminal():
             if terminal_id in rollout_env_id:
                 del rollout_env_id[terminal_id]
             if terminal_id in task_dir_env_id:
-                # remove the forked task directory
                 forked_task_dir = Path(task_dir_env_id[terminal_id])
                 if forked_task_dir.exists():
                     subprocess.run(['rm', '-r', str(forked_task_dir)])
@@ -597,6 +410,56 @@ def stop_terminal():
     except Exception as e:
         print(f" Error stopping terminal: {e}")
         return jsonify({"error": str(e)}), 500
+    
+def get_curr_dir_from_tmux_session(session: TmuxSession) -> str:
+    """Get the current working directory of the tmux session by parsing the prompt in pane output."""
+    try:
+        pane_output = session.capture_pane(capture_entire=True)
+        lines = [line.strip() for line in pane_output.splitlines() if line.strip()]
+        
+        for line in reversed(lines):
+            if ':' in line and '/' in line:
+                parts = line.split(':')
+                if len(parts) >= 2:
+                    path_part = parts[1].split('#')[0].split('$')[0].strip()
+                    if path_part.startswith('/'):
+                        return path_part
+            elif line.startswith('/') and not line.startswith('/root@'):
+                return line
+        
+        print("Warning: Could not parse current directory from pane output, using default /root")
+        return "/root"
+    except Exception as e:
+        print(f"Error getting current directory from tmux session: {e}")
+        return "/root"
+
+
+
+def save_session_in_thread(session: TmuxSession, terminal_id: str, curr_dir: str):
+    """Save the tmux session and update terminal state in a background thread."""
+    try:
+        with fork_save_lock:
+            session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=True, min_timeout_sec=1)
+        new_curr_dir = get_curr_dir_from_tmux_session(session)
+        if curr_dir != new_curr_dir:
+            with state_lock:
+                terminal_state_dict[terminal_id] = "stateful"
+        else:
+            with state_lock:
+                if terminal_id not in terminal_state_dict:
+                    terminal_state_dict[terminal_id] = "stateless"
+        print(f"Session saved successfully for terminal {terminal_id}")
+    except Exception as e:
+        print(f"Error saving session in thread for terminal {terminal_id}: {e}")
+
+def start_save_thread(session: TmuxSession, terminal_id: str, curr_dir: str):
+    """Start a background thread to save the session."""
+    save_thread = threading.Thread(
+        target=save_session_in_thread, 
+        args=(session, terminal_id, curr_dir),
+        daemon=True
+    )
+    save_thread.start()
 
 """
 Execute a command in the terminal session.
@@ -625,9 +488,12 @@ def execute_command():
     
     # TODO: add if blocking
     try:
-        session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=True, max_timeout_sec=2, min_timeout_sec=1)
+        session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=True, min_timeout_sec=1)
+        curr_dir = get_curr_dir_from_tmux_session(session)
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
-        session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=True, max_timeout_sec=2, min_timeout_sec=1)
+        
+        start_save_thread(session, terminal_id, curr_dir)
+        
         return jsonify({"status": "executed"}), 200
     except Exception as e:
         print(f"Error executing command: {e}")
@@ -644,8 +510,7 @@ def get_pane_logs():
                 return jsonify({"error": "Session not found"}), 404
             session = sessions[terminal_id]
         pane_output = session.capture_pane(capture_entire=True)
-        # print("Captured pane output:", pane_output)
-        # Split by newlines and filter out unwanted lines
+
         pane_output = [
             line for line in pane_output.splitlines()
             if "scripts/save.sh" not in line 
@@ -653,9 +518,8 @@ def get_pane_logs():
             and "scripts/ps.sh" not in line
             and "ps: command not found" not in line
         ]
-        # remove empty lines
+
         pane_output = [line for line in pane_output if line.strip() != '']
-        # Replace root@<containerid>: prefix with terminal-bench:
         pane_output = [re.sub(r'^root@[^:]+:', 'root@terminal:', line) for line in pane_output]
         pane_output = "\n".join(pane_output)
         print("Filtered pane output:", pane_output)
@@ -778,11 +642,17 @@ def hash():
             return jsonify({'error': 'Terminal with id {} not found'.format(terminal_id)})
     
     try:
-        return jsonify({'hash': terminal.get_hash()})
+        hash = terminal.get_hash()
+        if hash == "0000":
+            with state_lock:
+                if terminal_id in terminal_state_dict:
+                    if terminal_state_dict[terminal_id] == "stateful":
+                        return jsonify({'hash': "1111"})
+                    
+        return jsonify({'hash': hash})            
     except Exception as e:
         print(f"Error getting hash for terminal {terminal_id}: {e}")
         return jsonify({'hash': 'error'})
 
-
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=9909)
+    app.run(debug=False, host='0.0.0.0', port=9901)
