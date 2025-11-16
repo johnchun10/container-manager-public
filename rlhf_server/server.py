@@ -17,7 +17,8 @@ import re
 import string
 import threading
 import os
-
+from tmux import *
+from fork import *
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
 app = Flask(__name__)
@@ -39,110 +40,6 @@ fork_save_lock = threading.Lock()
 
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
 path = "../tasks"
-container_resurrect_path = "/root/tmux_resurrect"
-
-
-# @app.route('/env_to_rollout', methods=['POST'])
-# def get_rollout_from_env():
-#     data = request.json
-#     env_id = data['env_id']
-#     if env_id in rollout_env_id:
-#         return jsonify({'rollout_id': rollout_env_id[env_id]}), 200
-#     else:
-#         return jsonify({'error': 'Env ID not found'}), 404
-    
-# @app.route('/rollout_to_env', methods=['POST'])
-# def get_env_from_rollout():
-#     data = request.json
-#     rollout_id = data['rollout_id']
-#     for env_id, r_id in rollout_env_id.items():
-#         if r_id == rollout_id:
-#             return jsonify({'env_id': env_id}), 200
-#     return jsonify({'error': 'Rollout ID not found'}), 404
-
-def setup_tmux_res_in_container(container_name: str):
-    """Copy the tmux resurrect files to the specified container."""
-    # /home/bk478/susRL/tv-cache/rlhf-container-manager/rlhf_server/tmux-res
-    try: 
-        local_resurrect_path = "/home/av565/tvcache/rlhf-container-manager/rlhf_server/tmux-resurrect-master"
-        subprocess.run(
-                ["docker", "cp", str(local_resurrect_path), f"{container_name}:{container_resurrect_path}"],
-                check=True
-            )
-            # docker cp /bin/ps <container>:/usr/local/bin/ps
-        # subprocess.run(
-        #     ["docker", "cp", "/bin/ps", f"{container_name}:/bin/ps"],
-        #     check=True
-        # )
-        # update ~/.tmux.conf
-        subprocess.run(
-            [
-                "docker", "exec", container_name,
-                "bash", "-c",
-                f"chmod -R 755 '{container_resurrect_path}' && "
-                f"echo \"set -g @resurrect-dir '{container_resurrect_path}'\" >> ~/.tmux.conf && "
-                "echo \"set -g @resurrect-capture-pane-contents 'on'\" >> ~/.tmux.conf && "
-                "echo \"set -g @resurrect-save-bash-history 'on'\" >> ~/.tmux.conf && "
-                f"echo \"run-shell '{container_resurrect_path}/resurrect.tmux'\" >> ~/.tmux.conf && "
-                "tmux source-file ~/.tmux.conf"
-            ],
-            check=True
-        )
-        # subprocess.run(
-        # [
-        #     "docker", "exec", container_name,
-        #     "tmux", "send-keys", "-t", "agent", 
-        #     f"chmod -R 755 '{container_resurrect_path}'"
-        # ],
-        # check=True,
-        # text=True
-        # )
-    except Exception as e:
-        print(f"Error copying tmux resurrect to container {container_name}: {e}")
-
-def save_tmux_session(container_name: str):
-    """Save the specified tmux session in the container using tmux-resurrect."""
-    print("Saving tmux session for container:", container_name)
-    try:
-        # subprocess.run(
-        # [
-        #     "docker", "exec", container_name,
-        #     "bash", "-c",
-        #     f"chmod -R 755 '{container_resurrect_path}'"
-        # ],
-        # check=True,
-        # text=True
-        # )
-        subprocess.run([
-            "docker", "exec", container_name,
-            "tmux", "send-keys", "-t", "agent",   # name of the existing session
-            f"{container_resurrect_path}/scripts/save.sh", "Enter"
-        ], check=True)
-        
-    except Exception as e:
-        print(f"Error saving tmux session in container {container_name}: {e}")
-
-def restore_tmux_session(container_name: str):
-    """Restore the specified tmux session in the container using tmux-resurrect."""
-    print("Restoring tmux session for container:", container_name)
-    try:
-        # subprocess.run(
-        # [
-        #     "docker", "exec", container_name,
-        #     "tmux", "send-keys", "-t", "agent", 
-        #     f"chmod -R 755 '{container_resurrect_path}'", "Enter"
-        # ],
-        # check=True,
-        # text=True
-        # )
-        subprocess.run([
-            "docker", "exec", container_name,
-            "tmux", "send-keys", "-t", "agent",   # name of the existing session
-            f"{container_resurrect_path}/scripts/restore.sh", "Enter"
-        ], check=True)
-    except Exception as e:
-        print(f"Error restoring tmux session in container {container_name}: {e}")
-
 """
 Start a new terminal session.
 Arguments:
@@ -164,7 +61,6 @@ def start_terminal():
     
     terminal_id = str(uuid.uuid4())
     
-    # docker_compose_path = Path(f"../tasks/{task_name}/docker-compose.yaml")
     docker_compose_path = Path(f"{path}/{task_name}/docker-compose.yaml")
     if not docker_compose_path.exists():
         return jsonify({"error": f"File {docker_compose_path} does not exist"}), 400
@@ -187,7 +83,7 @@ def start_terminal():
         no_rebuild=False,
         cleanup=True,
         livestream=False,
-        disable_recording=False,
+        disable_recording=True,
     )
     end_time = time.perf_counter()
     print(f"Initialized terminal in {(end_time - start_time):.2f} seconds")
@@ -205,64 +101,17 @@ def start_terminal():
             trial_path[terminal_id] = trial_paths
             task_paths[terminal_id] = TaskPaths(input_path=Path(f"{path}/{task_name}"))
             rollout_env_id[terminal_id] = rollout_id
+
         et = time.perf_counter()
+
         print(f"Session created in {(et - st):.2f} seconds")
         setup_tmux_res_in_container(container_name=client_container_name)
         return jsonify({"id": terminal_id}), 200
+    
     except Exception as e:
         print(f"Error starting terminal for task {task_name}: {e}")
         return jsonify({"error": str(e)}), 500
 
-def get_all_container_by_id(rollout_id: str):
-    result = subprocess.run(
-        f"docker ps --filter name={rollout_id} --format '{{{{.Names}}}}'",
-        shell=True, capture_output=True, text=True
-    )
-    container_ids = result.stdout.strip().split('\n') if result.returncode == 0 and result.stdout.strip() else []
-    return container_ids
-
-def commit_container(container_names: list[str], old_rollout_id: str, new_rollout_id: str):
-    commit_results = []
-    image_names = []
-    for container_name in container_names:
-        new_container_name = container_name.replace(old_rollout_id, new_rollout_id)
-        commit_result = subprocess.run(
-            ['docker', 'commit', container_name, f'{new_container_name}'],
-            capture_output=True, text=True
-        )
-        if commit_result.returncode != 0:
-            return None, commit_result
-        image_names.append(f'{new_container_name}')
-        commit_results.append(commit_result)
-    return image_names, None
-
-def delete_committed_images(image_names: list[str]):
-    commit_results = []
-    for image_name in image_names:
-        commit_result = subprocess.run(
-            ['docker', 'rmi', '-f', image_name],
-            capture_output=True, text=True
-        )
-        if commit_result.returncode != 0:
-            return commit_result
-        commit_results.append(commit_result)
-    return None
-
-def get_service_name_from_container_name(container_names):
-    # postgres-csv-clean_0f3e208d-dfdc-45cf-96c6-4a45c8424593_test_container-db-1
-    #
-    services_dict = {}
-    for container_name in container_names:
-        original_name = container_name
-        while '_fork' in container_name:
-            container_name = container_name.replace('_fork', '')
-        parts = container_name.split('_')
-        if parts[-1] == 'container':
-            services_dict['main'] = original_name
-        else:
-            service_name = parts[-1].split('-')[1]
-            services_dict[service_name] = original_name
-    return services_dict
 
 def create_forked_task_dir(container_names, task_name, terminal_id):
     with state_lock:
@@ -407,6 +256,7 @@ def stop_terminal():
                     subprocess.run(['rm', '-r', str(forked_task_dir)])
                 del task_dir_env_id[terminal_id]
         return jsonify({"status": "stopped"}), 200
+    
     except Exception as e:
         print(f" Error stopping terminal: {e}")
         return jsonify({"error": str(e)}), 500
@@ -439,7 +289,7 @@ def save_session_in_thread(session: TmuxSession, terminal_id: str, curr_dir: str
     """Save the tmux session and update terminal state in a background thread."""
     try:
         with fork_save_lock:
-            session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], block=True, min_timeout_sec=1)
+            session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], min_timeout_sec=1)
         new_curr_dir = get_curr_dir_from_tmux_session(session)
         if curr_dir != new_curr_dir:
             with state_lock:
@@ -488,8 +338,13 @@ def execute_command():
     
     # TODO: add if blocking
     try:
-        session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], block=True, min_timeout_sec=1)
+        pane_logs = session.capture_pane(capture_entire=True)
+        print(f"~~~~~~~~~~~Pane logs before restore for terminal {terminal_id}:\n{pane_logs}\n\n\n")
+        session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], min_timeout_sec=1)
         curr_dir = get_curr_dir_from_tmux_session(session)
+        pane_logs = session.capture_pane(capture_entire=True)
+        print(f"~~~~~~~~~~~Pane logs after restore for terminal {terminal_id}:\n{pane_logs}\n\n\n")
+        print(f"Current directory before executing command for terminal {terminal_id}: {curr_dir}")
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
         
         start_save_thread(session, terminal_id, curr_dir)
@@ -540,7 +395,6 @@ def run_tests():
         task_path = task_paths[terminal_id]
         terminal = terminals[terminal_id]
 
-    # setup the environment to run tests
     try:
         paths = [
             task_path.run_tests_path,
