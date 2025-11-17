@@ -164,13 +164,10 @@ def fork_terminal():
             return jsonify({"error": "Rollout ID not found for terminal"}), 404
         rollout_id = rollout_env_id[terminal_id]
     
-    print("Rolling out from rollout id:", rollout_id)
 
     container_names = get_all_container_by_id(rollout_id)
-    print("Container names:", container_names)
     with fork_save_lock:
         image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
-    print("Committed forked image names:", image_names)
     if commit_error:
         return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
     new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
@@ -202,10 +199,7 @@ def fork_terminal():
         del_result = delete_committed_images(image_names)
         if del_result:
             print(f"Error deleting images: {del_result.stderr}")
-        print("deleted committed images successfully")
-        print(f"list of running containers {image_names}")
         new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
-        print("created new session successfully")
         new_terminal_id = str(uuid.uuid4())
         
         with state_lock:
@@ -339,12 +333,9 @@ def execute_command():
     # TODO: add if blocking
     try:
         pane_logs = session.capture_pane(capture_entire=True)
-        print(f"~~~~~~~~~~~Pane logs before restore for terminal {terminal_id}:\n{pane_logs}\n\n\n")
         session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], min_timeout_sec=1)
         curr_dir = get_curr_dir_from_tmux_session(session)
         pane_logs = session.capture_pane(capture_entire=True)
-        print(f"~~~~~~~~~~~Pane logs after restore for terminal {terminal_id}:\n{pane_logs}\n\n\n")
-        print(f"Current directory before executing command for terminal {terminal_id}: {curr_dir}")
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
         
         start_save_thread(session, terminal_id, curr_dir)
@@ -377,7 +368,7 @@ def get_pane_logs():
         pane_output = [line for line in pane_output if line.strip() != '']
         pane_output = [re.sub(r'^root@[^:]+:', 'root@terminal:', line) for line in pane_output]
         pane_output = "\n".join(pane_output)
-        print("Filtered pane output:", pane_output)
+        # print("Filtered pane output:", pane_output)
         return jsonify({"logs": pane_output}), 200
     except Exception as e:
         print(f"Error getting pane logs: {e}")
