@@ -39,7 +39,8 @@ state_lock = threading.Lock()
 fork_save_lock = threading.Lock()
 
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
-path = "../tasks"
+# path = "../tasks"
+
 """
 Start a new terminal session.
 Arguments:
@@ -208,7 +209,7 @@ def fork_terminal():
             terminals[new_terminal_id] = new_terminal
             sessions[new_terminal_id] = new_session
             trial_path[new_terminal_id] = trial_paths 
-            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{path}/{new_task_dir}"))  
+            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))  
         return jsonify({"id": new_terminal_id}), 200
     except Exception as e:
         print(f"Error forking terminal: {e}")
@@ -424,7 +425,8 @@ def run_tests():
         return jsonify({'passed': test_result})
 
     except Exception as e:
-        print(f"Error while setting up environment for tests: {e}")
+        import traceback
+        print(f"Error while setting up environment for tests: {traceback.format_exc()}")
         return jsonify({'error': f"Error while setting up environment for tests: {e}"}), 404
 
 @app.route('/solve', methods=['POST'])
@@ -500,4 +502,4 @@ def hash():
         return jsonify({'hash': 'error'})
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=9901)
+    app.run(debug=False, host='0.0.0.0', port=9909)
