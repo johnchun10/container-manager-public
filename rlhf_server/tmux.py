@@ -17,16 +17,12 @@ def setup_tmux_res_in_container(container_name: str):
                 f"echo \"set -g @resurrect-dir '{container_resurrect_path}'\" >> ~/.tmux.conf && "
                 "echo \"set -g @resurrect-capture-pane-contents 'on'\" >> ~/.tmux.conf && "
                 "echo \"set -g @resurrect-save-bash-history 'on'\" >> ~/.tmux.conf && "
-#                 set -g @resurrect-save-shell-history 'on'
-# set -g @resurrect-capture-pane-contents 'on'
-# set -g @resurrect-strategy-vim 'session'
                 "echo \"set -g @resurrect-save-shell-history 'on'\" >> ~/.tmux.conf && "
                 f"echo \"set -g @resurrect-strategy-vim 'session'\" >> ~/.tmux.conf && "
                 f"echo \"set -g @resurrect-strategy 'vim'\" >> ~/.tmux.conf && "
 
                 f"echo \"run-shell '{container_resurrect_path}/resurrect.tmux'\" >> ~/.tmux.conf && "
-                "tmux source-file ~/.tmux.conf && "
-                "hostname terminal"
+                "tmux source-file ~/.tmux.conf"
             ],
             check=True
         )
@@ -38,7 +34,7 @@ def save_tmux_session(container_name: str):
     try:
         subprocess.run([
             "docker", "exec", container_name,
-            "tmux", "send-keys", "-t", "agent",   # name of the existing session
+            "tmux", "send-keys", "-t", "agent",   
             f"{container_resurrect_path}/scripts/save.sh", "Enter"
         ], check=True)
         
@@ -50,7 +46,7 @@ def restore_tmux_session(container_name: str):
     try:
         subprocess.run([
             "docker", "exec", container_name,
-            "tmux", "send-keys", "-t", "agent",   # name of the existing session
+            "tmux", "send-keys", "-t", "agent",   
             f"{container_resurrect_path}/scripts/restore.sh", "Enter"
         ], check=True)
     except Exception as e:

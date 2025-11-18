@@ -17,6 +17,7 @@ import re
 import string
 import threading
 import os
+import re
 from tmux import *
 from fork import *
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
@@ -37,9 +38,10 @@ terminal_state_dict = {}
 # Single lock for all dictionaries
 state_lock = threading.Lock()
 fork_save_lock = threading.Lock()
+hash_lock = threading.Lock()
 
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
-# path = "../tasks"
+path = "../tasks"
 
 """
 Start a new terminal session.
@@ -256,44 +258,75 @@ def stop_terminal():
         print(f" Error stopping terminal: {e}")
         return jsonify({"error": str(e)}), 500
     
-def get_curr_dir_from_tmux_session(session: TmuxSession) -> str:
-    """Get the current working directory of the tmux session by parsing the prompt in pane output."""
+
+def _expand_container_path(user: str, path: str) -> str:
+    """
+    Expand ~ inside a typical Linux/Docker container:
+      - root -> /root
+      - other -> /home/<user>
+    """
+    if not path.startswith('~'):
+        return path
+
+    if user == 'root':
+        home = '/root'
+    else:
+        home = f'/home/{user}'
+
+    if path == '~':
+        return home
+    else:
+        # handle things like ~/foo/bar
+        return home + path[1:]  # replace leading ~ with home
+
+
+def get_curr_dir_from_tmux_session(session) -> str:
+    PROMPT_RE = re.compile(
+    r'(?P<user>[^\s@]+)@(?P<host>[^:\s]+):(?P<path>[^#\$\s]+)[#\$]'
+    )
     try:
         pane_output = session.capture_pane(capture_entire=True)
-        lines = [line.strip() for line in pane_output.splitlines() if line.strip()]
-        
+        lines = [line.rstrip('\n') for line in pane_output.splitlines() if line.strip()]
+
         for line in reversed(lines):
-            if ':' in line and '/' in line:
-                parts = line.split(':')
-                if len(parts) >= 2:
-                    path_part = parts[1].split('#')[0].split('$')[0].strip()
-                    if path_part.startswith('/'):
-                        return path_part
-            elif line.startswith('/') and not line.startswith('/root@'):
-                return line
-        
-        print("Warning: Could not parse current directory from pane output, using default /root")
+            matches = list(PROMPT_RE.finditer(line))
+            if matches:
+                last = matches[-1]
+                user = last.group('user')
+                raw_path = last.group('path').strip()
+
+                path = _expand_container_path(user, raw_path)
+
+                if path.startswith('/'):
+                    return path
+
+            stripped = line.strip()
+            if stripped.startswith('/'):
+                return stripped
+
+        print("Warning: Could not parse current directory from pane output, using /root")
         return "/root"
     except Exception as e:
         print(f"Error getting current directory from tmux session: {e}")
         return "/root"
 
 
-
 def save_session_in_thread(session: TmuxSession, terminal_id: str, curr_dir: str):
     """Save the tmux session and update terminal state in a background thread."""
+    
     try:
-        with fork_save_lock:
-            session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], min_timeout_sec=1)
-        new_curr_dir = get_curr_dir_from_tmux_session(session)
-        if curr_dir != new_curr_dir:
-            with state_lock:
-                terminal_state_dict[terminal_id] = "stateful"
-        else:
-            with state_lock:
-                if terminal_id not in terminal_state_dict:
-                    terminal_state_dict[terminal_id] = "stateless"
-        print(f"Session saved successfully for terminal {terminal_id}")
+        with hash_lock:
+            with fork_save_lock:
+                session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], min_timeout_sec=1)
+            new_curr_dir = get_curr_dir_from_tmux_session(session)
+            if curr_dir != new_curr_dir:
+                with state_lock:
+                    terminal_state_dict[terminal_id] = "stateful"
+            else:
+                with state_lock:
+                    if terminal_id not in terminal_state_dict:
+                        terminal_state_dict[terminal_id] = "stateless"
+            print(f"Session saved successfully for terminal {terminal_id}")
     except Exception as e:
         print(f"Error saving session in thread for terminal {terminal_id}: {e}")
 
@@ -333,12 +366,10 @@ def execute_command():
     
     # TODO: add if blocking
     try:
-        pane_logs = session.capture_pane(capture_entire=True)
         session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], min_timeout_sec=1)
         curr_dir = get_curr_dir_from_tmux_session(session)
-        pane_logs = session.capture_pane(capture_entire=True)
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
-        
+
         start_save_thread(session, terminal_id, curr_dir)
         
         return jsonify({"status": "executed"}), 200
@@ -491,12 +522,17 @@ def hash():
     try:
         hash = terminal.get_hash()
         if hash == "0000":
-            with state_lock:
+            with state_lock and hash_lock:
                 if terminal_id in terminal_state_dict:
                     if terminal_state_dict[terminal_id] == "stateful":
                         return jsonify({'hash': "1111"})
-                    
-        return jsonify({'hash': hash})            
+                    else:
+                        return jsonify({'hash': "0000"})
+                else:
+                    print(f"State not updated yet for terminal {terminal_id}, returning stateful hash")
+                    return jsonify({'hash': "1111"})
+
+        return jsonify({'hash': hash})
     except Exception as e:
         print(f"Error getting hash for terminal {terminal_id}: {e}")
         return jsonify({'hash': 'error'})
