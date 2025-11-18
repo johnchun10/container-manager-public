@@ -1,10 +1,21 @@
 import subprocess
+import os
+from pathlib import Path
 container_resurrect_path = "/root/tmux_resurrect"
-
+CONTAINER_RESURRECT_PATH = os.getenv(
+    "CONTAINER_RESURRECT_PATH",
+    "/root/tmux_resurrect"                                # tmux-resurrect path *inside* container
+)
+container_resurrect_path = CONTAINER_RESURRECT_PATH
+BASE_DIR = Path(__file__).resolve().parent
+LOCAL_RESURRECT_PATH = os.getenv(
+    "LOCAL_RESURRECT_PATH",
+    str(BASE_DIR / "tmux_res"),  # tmux-res directory next to server.py
+)
 def setup_tmux_res_in_container(container_name: str):
     """Copy the tmux resurrect files to the specified container."""
     try: 
-        local_resurrect_path = "/home/bk478/susRL/tv-cache/rlhf-container-manager/rlhf_server/tmux-res"
+        local_resurrect_path = LOCAL_RESURRECT_PATH
         subprocess.run(
                 ["docker", "cp", str(local_resurrect_path), f"{container_name}:{container_resurrect_path}"],
                 check=True

@@ -30,7 +30,7 @@ sessions: Dict[str, TmuxSession] = {}
 trial_path: Dict[str, TrialPaths] = {}
 task_paths: Dict[str, TaskPaths] = {}
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
-path = "../env_bench/tasks"
+# path = "../env_bench/tasks"
 rollout_env_id = {}
 task_dir_env_id = {}
 terminal_state_dict = {}
@@ -41,7 +41,10 @@ fork_save_lock = threading.Lock()
 hash_lock = threading.Lock()
 
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
-path = "../tasks"
+# path = "../tasks"
+TASKS_ROOT = os.getenv("TASKS_ROOT", "../tasks") 
+FLASK_PORT = int(os.getenv("FLASK_PORT", "9901"))
+path = TASKS_ROOT
 
 """
 Start a new terminal session.
@@ -541,4 +544,5 @@ def hash():
         return jsonify({'hash': 'error'})
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=9909)
+    
+    app.run(debug=False, host='0.0.0.0', port=FLASK_PORT)
