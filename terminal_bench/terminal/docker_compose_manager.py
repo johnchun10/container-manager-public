@@ -253,7 +253,7 @@ class DockerComposeManager:
                 f["Path"] for f in diff_files if f.get("Kind") == 1  # Kind=1 = modified/added file
             )
             
-            print('Number of files changed: {}'.format(len(changed_paths)))
+            
             # print('Changed files: {}'.format(changed_paths))
             
             # Filter out paths we want to ignore
@@ -264,6 +264,9 @@ class DockerComposeManager:
                 and p not in ['/root', '/root/.bash_history', '/tmp', '/tmp/tmux-0', '/tmp/tmux-0/default']
             ]
             # print('Changed files after removal: {}'.format(changed_paths))
+            print('Number of files changed: {}'.format(len(changed_paths)))
+            if len(changed_paths) > 0:
+                print('Changed files after removal: {}'.format(changed_paths[0]))
             if not changed_paths:
                 return "0000"
             return "1111"
