@@ -250,7 +250,7 @@ class DockerComposeManager:
         try:
             diff_files = self._client_container.diff()
             changed_paths = sorted(
-                f["Path"] for f in diff_files if f.get("Kind") == 1  # Kind=1 = modified/added file
+                f["Path"] for f in diff_files  # Kind=1 = modified/added file
             )
             
             
