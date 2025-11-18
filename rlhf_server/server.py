@@ -342,6 +342,9 @@ def execute_command():
         start_save_thread(session, terminal_id, curr_dir)
         
         return jsonify({"status": "executed"}), 200
+    except TimeoutError as te:
+        print(f'Timed out executing command: {command} in terminal {terminal_id}')
+        return jsonify({"error": str(e)}), 504
     except Exception as e:
         print(f"Error executing command: {e}")
         return jsonify({"error": str(e)}), 500
