@@ -13,6 +13,7 @@ export TASKS_ROOT="${TASKS_ROOT:-../tasks}"
 export CONTAINER_RESURRECT_PATH="${CONTAINER_RESURRECT_PATH:-/root/tmux_resurrect}"
 export LOCAL_RESURRECT_PATH="${LOCAL_RESURRECT_PATH:-$SCRIPT_DIR/tmux-res}"
 export FLASK_PORT="${FLASK_PORT:-9901}"
+export ENV_BENCH="${ENV_BENCH:0}"
 
 # ---- Run the server ----
 uv run server.py
