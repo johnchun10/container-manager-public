@@ -400,6 +400,8 @@ def get_pane_logs():
             if "scripts/save.sh" not in line 
             and "scripts/restore.sh" not in line 
             and "scripts/ps.sh" not in line
+            and "scripts/startup.sh" not in line
+            and "scripts/exit.sh" not in line
             and "ps: command not found" not in line
         ]
 

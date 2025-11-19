@@ -24,16 +24,16 @@ def setup_tmux_res_in_container(container_name: str):
             [
                 "docker", "exec", container_name,
                 "bash", "-c",
-                f"chmod -R 755 '{container_resurrect_path}' && "
-                f"echo \"set -g @resurrect-dir '{container_resurrect_path}'\" >> ~/.tmux.conf && "
-                "echo \"set -g @resurrect-capture-pane-contents 'on'\" >> ~/.tmux.conf && "
-                "echo \"set -g @resurrect-save-bash-history 'on'\" >> ~/.tmux.conf && "
-                "echo \"set -g @resurrect-save-shell-history 'on'\" >> ~/.tmux.conf && "
-                f"echo \"set -g @resurrect-strategy-vim 'session'\" >> ~/.tmux.conf && "
-                f"echo \"set -g @resurrect-strategy 'vim'\" >> ~/.tmux.conf && "
+                f"chmod -R 755 '{container_resurrect_path}'"
+                # f"echo \"set -g @resurrect-dir '{container_resurrect_path}'\" >> ~/.tmux.conf && "
+                # "echo \"set -g @resurrect-capture-pane-contents 'on'\" >> ~/.tmux.conf && "
+                # "echo \"set -g @resurrect-save-bash-history 'on'\" >> ~/.tmux.conf && "
+                # "echo \"set -g @resurrect-save-shell-history 'on'\" >> ~/.tmux.conf && "
+                # f"echo \"set -g @resurrect-strategy-vim 'session'\" >> ~/.tmux.conf && "
+                # f"echo \"set -g @resurrect-strategy 'vim'\" >> ~/.tmux.conf && "
 
-                f"echo \"run-shell '{container_resurrect_path}/resurrect.tmux'\" >> ~/.tmux.conf && "
-                "tmux source-file ~/.tmux.conf"
+                # f"echo \"run-shell '{container_resurrect_path}/resurrect.tmux'\" >> ~/.tmux.conf && "
+                # "tmux source-file ~/.tmux.conf"
             ],
             check=True
         )
