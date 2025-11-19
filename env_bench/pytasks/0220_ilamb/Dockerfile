@@ -98,8 +98,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 RUN rm -rf /var/lib/apt/lists/*
 
 # Create and set working directory
-RUN mkdir -p /data/project
-WORKDIR /data/project
+WORKDIR /app
 
 # Make conda always say yes to prompts
 ENV CONDA_ALWAYS_YES=true
@@ -112,5 +111,3 @@ RUN pyenv global $(cut -d"," -f1 /tmp/python-versions.csv | tr "\n" " ") \
 # Conda init bash
 RUN conda init bash
 
-# Set default shell to bash
-CMD ["/bin/bash"]

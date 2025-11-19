@@ -147,8 +147,7 @@ instruction: |-
       RUN rm -rf /var/lib/apt/lists/*
       
       # Create and set working directory
-      RUN mkdir -p /data/project
-      WORKDIR /data/project
+      WORKDIR /app
       
       # Make conda always say yes to prompts
       ENV CONDA_ALWAYS_YES=true
@@ -160,9 +159,6 @@ instruction: |-
       
       # Conda init bash
       RUN conda init bash
-      
-      # Set default shell to bash
-      CMD ["/bin/bash"]
       =================
       END DOCKER FILE
       =================
