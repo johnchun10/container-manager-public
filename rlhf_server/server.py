@@ -320,7 +320,7 @@ def save_session_in_thread(session: TmuxSession, terminal_id: str, curr_dir: str
     try:
         with hash_lock:
             with fork_save_lock:
-                session.send_keys([f"{container_resurrect_path}/scripts/save.sh", 'Enter'], min_timeout_sec=1)
+                session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=1)
             new_curr_dir = get_curr_dir_from_tmux_session(session)
             if curr_dir != new_curr_dir:
                 with state_lock:
@@ -369,7 +369,7 @@ def execute_command():
     
     # TODO: add if blocking
     try:
-        session.send_keys([f"{container_resurrect_path}/scripts/restore.sh", 'Enter'], min_timeout_sec=1)
+        session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=1)
         curr_dir = get_curr_dir_from_tmux_session(session)
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
 
