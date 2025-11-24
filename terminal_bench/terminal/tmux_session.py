@@ -129,20 +129,20 @@ class TmuxSession:
         self._exec_run(self._tmux_start_session)
 
         # if self._recording_path:
-            # self._logger.debug("Starting recording.")
-            # self.send_keys(
-            #     keys=[
-            #         f"asciinema rec --stdin {self._recording_path}",
-            #         "Enter",
-            #     ],
-            #     # min_timeout_sec=3.0,
-            # )
-            # self.send_keys(
-            #     keys=[
-            #         "clear",
-            #         "Enter",
-            #     ],
-            # )
+        #     self._logger.debug("Starting recording.")
+        #     self.send_keys(
+        #         keys=[
+        #             f"asciinema rec --stdin {self._recording_path}",
+        #             "Enter",
+        #         ],
+        #         # min_timeout_sec=3.0,
+        #     )
+        #     self.send_keys(
+        #         keys=[
+        #             "clear",
+        #             "Enter",
+        #         ],
+        #     )
 
     def stop(self) -> None:
         if self._recording_path:
