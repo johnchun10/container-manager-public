@@ -34,6 +34,7 @@ task_paths: Dict[str, TaskPaths] = {}
 rollout_env_id = {}
 task_dir_env_id = {}
 terminal_state_dict = {}
+last_executed_command = {}
 
 # Single lock for all dictionaries
 state_lock = threading.Lock()
@@ -45,7 +46,7 @@ hash_lock = threading.Lock()
 TASKS_ROOT = os.getenv("TASKS_ROOT", "../tasks") 
 FLASK_PORT = int(os.getenv("FLASK_PORT", "9901"))
 path = TASKS_ROOT
-
+enable_caching = os.getenv("ENABLE_CACHING", "0") == "1"
 """
 Start a new terminal session.
 Arguments:
@@ -258,7 +259,7 @@ def stop_terminal():
         return jsonify({"status": "stopped"}), 200
     
     except Exception as e:
-        print(f" Error stopping terminal: {e}")
+        print(f" Error stopping terminal: {e} for terminal id {terminal_id}")
         return jsonify({"error": str(e)}), 500
     
 
@@ -369,11 +370,14 @@ def execute_command():
     
     # TODO: add if blocking
     try:
-        session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=1)
+        if enable_caching:
+            session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=1)
         curr_dir = get_curr_dir_from_tmux_session(session)
+        with state_lock:
+            last_executed_command[terminal_id] = command
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
-
-        start_save_thread(session, terminal_id, curr_dir)
+        if enable_caching:
+            start_save_thread(session, terminal_id, curr_dir)
         
         return jsonify({"status": "executed"}), 200
     except TimeoutError as te:
@@ -382,6 +386,17 @@ def execute_command():
     except Exception as e:
         print(f"Error executing command: {e}")
         return jsonify({"error": str(e)}), 500
+    
+def trim_before_command(text: str, command: str) -> str:
+    cmd = command.strip()
+    lines = text.splitlines()
+    
+    for i, line in enumerate(lines):
+        if cmd in line:
+            # keep from this line onward
+            return "\n".join(lines[i:])
+    
+    return text
 
 @app.route('/get_pane_logs', methods=['POST'])
 def get_pane_logs():
@@ -393,6 +408,7 @@ def get_pane_logs():
             if terminal_id not in sessions:
                 return jsonify({"error": "Session not found"}), 404
             session = sessions[terminal_id]
+            last_executed_cmd = last_executed_command.get(terminal_id, "")
         pane_output = session.capture_pane(capture_entire=True)
 
         pane_output = [
@@ -408,10 +424,13 @@ def get_pane_logs():
         pane_output = [line for line in pane_output if line.strip() != '']
         pane_output = [re.sub(r'^root@[^:]+:', 'root@terminal:', line) for line in pane_output]
         pane_output = "\n".join(pane_output)
+        if enable_caching:
+            if last_executed_cmd:
+                pane_output = trim_before_command(pane_output, last_executed_cmd)
         # print("Filtered pane output:", pane_output)
         return jsonify({"logs": pane_output}), 200
     except Exception as e:
-        print(f"Error getting pane logs: {e}")
+        print(f"Error getting pane logs: {e} for terminal {terminal_id}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/test', methods=['POST'])
@@ -546,5 +565,5 @@ def hash():
         return jsonify({'hash': 'error'})
 
 if __name__ == '__main__':
-    
+    print(f"Starting RLHF server on port {FLASK_PORT} with tasks root {TASKS_ROOT} and caching set to {enable_caching}")
     app.run(debug=False, host='0.0.0.0', port=FLASK_PORT)
