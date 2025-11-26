@@ -308,11 +308,11 @@ def get_curr_dir_from_tmux_session(session) -> str:
             if stripped.startswith('/'):
                 return stripped
 
-        print("Warning: Could not parse current directory from pane output, using /root")
-        return "/root"
+        print(f"Warning: Could not parse current directory from pane output, using /app for pane output: {pane_output}")
+        return "/app"
     except Exception as e:
         print(f"Error getting current directory from tmux session: {e}")
-        return "/root"
+        return "/app"
 
 
 def save_session_in_thread(session: TmuxSession, terminal_id: str, curr_dir: str):
