@@ -375,7 +375,7 @@ def execute_command():
     command = data['command']
     blocking = data['blocking']
     timeout = data['timeout']
-    
+    start_time = time.perf_counter()
     with state_lock:
         if terminal_id not in sessions:
             return jsonify({"error": "Session not found"}), 404
@@ -390,6 +390,8 @@ def execute_command():
         # with state_lock:
         #     last_executed_command[terminal_id] = command
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
+        end_time = time.perf_counter()
+        print(f"[TOOL-TIME] Executed command in {(end_time - start_time):.2f} seconds for terminal {terminal_id}")
         # if enable_caching:
         #     start_save_thread(session, terminal_id, curr_dir)
         
