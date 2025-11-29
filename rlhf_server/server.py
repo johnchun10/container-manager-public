@@ -47,6 +47,7 @@ TASKS_ROOT = os.getenv("TASKS_ROOT", "../tasks")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "9901"))
 path = TASKS_ROOT
 enable_caching = os.getenv("ENABLE_CACHING", "0") == "1"
+enable_hashing = False
 """
 Start a new terminal session.
 Arguments:
@@ -70,6 +71,7 @@ def start_terminal():
     
     docker_compose_path = Path(f"{path}/{task_name}/docker-compose.yaml")
     if not docker_compose_path.exists():
+        print(f"Error: docker-compose.yaml not found for task {task_name} at {docker_compose_path}")
         return jsonify({"error": f"File {docker_compose_path} does not exist"}), 400
     
     client_image_name = f'{task_name}_{rollout_id}_test'
@@ -112,7 +114,10 @@ def start_terminal():
         et = time.perf_counter()
 
         print(f"Session created in {(et - st):.2f} seconds")
-        setup_tmux_res_in_container(container_name=client_container_name)
+        
+        if enable_caching:
+            setup_tmux_res_in_container(container_name=client_container_name)
+            session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
         return jsonify({"id": terminal_id}), 200
     
     except Exception as e:
@@ -170,7 +175,12 @@ def fork_terminal():
             print("Rollout ID not found for terminal:", terminal_id)
             return jsonify({"error": "Rollout ID not found for terminal"}), 404
         rollout_id = rollout_env_id[terminal_id]
-    
+        if terminal_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+        session = sessions[terminal_id]
+
+    if enable_caching:
+        session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
 
     container_names = get_all_container_by_id(rollout_id)
     with fork_save_lock:
@@ -215,7 +225,10 @@ def fork_terminal():
             terminals[new_terminal_id] = new_terminal
             sessions[new_terminal_id] = new_session
             trial_path[new_terminal_id] = trial_paths 
-            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))  
+            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))
+
+        if enable_caching:
+            new_session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
         return jsonify({"id": new_terminal_id}), 200
     except Exception as e:
         print(f"Error forking terminal: {e}")
@@ -370,14 +383,15 @@ def execute_command():
     
     # TODO: add if blocking
     try:
-        if enable_caching:
-            session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=1)
-        curr_dir = get_curr_dir_from_tmux_session(session)
-        with state_lock:
-            last_executed_command[terminal_id] = command
+        # if enable_caching:
+        #     session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=1)
+        if enable_hashing:
+            curr_dir = get_curr_dir_from_tmux_session(session)
+        # with state_lock:
+        #     last_executed_command[terminal_id] = command
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
-        if enable_caching:
-            start_save_thread(session, terminal_id, curr_dir)
+        # if enable_caching:
+        #     start_save_thread(session, terminal_id, curr_dir)
         
         return jsonify({"status": "executed"}), 200
     except TimeoutError as te:
@@ -424,9 +438,9 @@ def get_pane_logs():
         pane_output = [line for line in pane_output if line.strip() != '']
         pane_output = [re.sub(r'^root@[^:]+:', 'root@terminal:', line) for line in pane_output]
         pane_output = "\n".join(pane_output)
-        if enable_caching:
-            if last_executed_cmd:
-                pane_output = trim_before_command(pane_output, last_executed_cmd)
+        # if enable_caching:
+        #     if last_executed_cmd:
+        #         pane_output = trim_before_command(pane_output, last_executed_cmd)
         # print("Filtered pane output:", pane_output)
         return jsonify({"logs": pane_output}), 200
     except Exception as e:
@@ -537,6 +551,7 @@ def solve():
 
 @app.route('/hash', methods=['POST'])
 def hash():
+    return jsonify({'hash': "1111"})
     data = request.json
     terminal_id = data['id']
 
