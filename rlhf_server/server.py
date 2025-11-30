@@ -35,6 +35,7 @@ rollout_env_id = {}
 task_dir_env_id = {}
 terminal_state_dict = {}
 last_executed_command = {}
+panelog_forked_terminal_dict = {}
 
 # Single lock for all dictionaries
 state_lock = threading.Lock()
@@ -180,6 +181,7 @@ def fork_terminal():
         session = sessions[terminal_id]
 
     if enable_caching:
+        old_pane_log = get_pane_logs_local(terminal_id)
         session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
 
     container_names = get_all_container_by_id(rollout_id)
@@ -226,8 +228,10 @@ def fork_terminal():
             sessions[new_terminal_id] = new_session
             trial_path[new_terminal_id] = trial_paths 
             task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))
+            panelog_forked_terminal_dict[new_terminal_id] = old_pane_log
 
         if enable_caching:
+
             new_session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
         return jsonify({"id": new_terminal_id}), 200
     except Exception as e:
@@ -414,15 +418,18 @@ def trim_before_command(text: str, command: str) -> str:
     
     return text
 
-@app.route('/get_pane_logs', methods=['POST'])
-def get_pane_logs():
-    data = request.json
-    terminal_id = data['id']
+def get_pane_logs_local(terminal_id: str):
     
     try:
         with state_lock:
             if terminal_id not in sessions:
                 return jsonify({"error": "Session not found"}), 404
+            if terminal_id not in panelog_forked_terminal_dict:
+                print(f"No forked pane log found for terminal {terminal_id}")
+                old_pane_log = ""
+            else:
+                print(f"Using forked pane log for terminal {terminal_id}")
+                old_pane_log = panelog_forked_terminal_dict[terminal_id]
             session = sessions[terminal_id]
             last_executed_cmd = last_executed_command.get(terminal_id, "")
         pane_output = session.capture_pane(capture_entire=True)
@@ -444,6 +451,53 @@ def get_pane_logs():
         #     if last_executed_cmd:
         #         pane_output = trim_before_command(pane_output, last_executed_cmd)
         # print("Filtered pane output:", pane_output)
+        if old_pane_log and old_pane_log != "":
+            pane_output = old_pane_log + "\n" + pane_output
+        return pane_output
+    except Exception as e:
+        print(f"Error getting pane logs: {e} for terminal {terminal_id}")
+        return ""
+
+
+@app.route('/get_pane_logs', methods=['POST'])
+def get_pane_logs():
+    data = request.json
+    terminal_id = data['id']
+    
+    try:
+        with state_lock:
+            if terminal_id not in sessions:
+                return jsonify({"error": "Session not found"}), 404
+            if enable_caching:
+                if terminal_id not in panelog_forked_terminal_dict:
+                    print(f"No forked pane log found for terminal {terminal_id}")
+                    old_pane_log = ""
+                else:
+                    old_pane_log = panelog_forked_terminal_dict[terminal_id]
+            session = sessions[terminal_id]
+            last_executed_cmd = last_executed_command.get(terminal_id, "")
+        pane_output = session.capture_pane(capture_entire=True)
+
+        pane_output = [
+            line for line in pane_output.splitlines()
+            if "scripts/save.sh" not in line 
+            and "scripts/restore.sh" not in line 
+            and "scripts/ps.sh" not in line
+            and "scripts/startup.sh" not in line
+            and "scripts/exit.sh" not in line
+            and "ps: command not found" not in line
+        ]
+
+        pane_output = [line for line in pane_output if line.strip() != '']
+        pane_output = [re.sub(r'^root@[^:]+:', 'root@terminal:', line) for line in pane_output]
+        pane_output = "\n".join(pane_output)
+        # if enable_caching:
+        #     if last_executed_cmd:
+        #         pane_output = trim_before_command(pane_output, last_executed_cmd)
+        # print("Filtered pane output:", pane_output)
+        if enable_caching:
+            if old_pane_log and old_pane_log != "":
+                pane_output = old_pane_log + "\n" + pane_output
         return jsonify({"logs": pane_output}), 200
     except Exception as e:
         print(f"Error getting pane logs: {e} for terminal {terminal_id}")
