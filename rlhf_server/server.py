@@ -406,7 +406,7 @@ def execute_command():
         print(f'Timed out executing command: {command} in terminal {terminal_id}')
         return jsonify({"error": str(te)}), 504
     except Exception as e:
-        print(f"Error executing command: {e}")
+        print(f"Error executing command: {e} for command: {command} in terminal {terminal_id}")
         return jsonify({"error": str(e)}), 500
     
 def trim_before_command(text: str, command: str) -> str:
