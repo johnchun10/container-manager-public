@@ -393,6 +393,8 @@ def execute_command():
             curr_dir = get_curr_dir_from_tmux_session(session)
         # with state_lock:
         #     last_executed_command[terminal_id] = command
+        lines = [line.strip() for line in command.splitlines() if line.strip()]
+        command = " && ".join(lines)
         session.send_keys([command, 'Enter'], block=blocking, max_timeout_sec=timeout)
         end_time = time.perf_counter()
         print(f"[TOOL-TIME] Executed command in {(end_time - start_time):.2f} seconds for terminal {terminal_id}")
