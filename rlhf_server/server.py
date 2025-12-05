@@ -159,38 +159,7 @@ def create_forked_task_dir(container_names, task_name, terminal_id):
         yaml.dump(docker_compose, f)
     return new_task_dir
 
-@app.route('/fork', methods=['POST'])
-def fork_terminal():
-    data = request.json
-    if "id" not in data:
-        return jsonify({"error": "No terminal id provided"}), 400
-    terminal_id = data['id']
-    new_rollout_id = str(uuid.uuid4())
-    with state_lock:
-        if terminal_id not in terminals:
-            print("Terminal not found:", terminal_id)
-            return jsonify({"error": "Terminal not found"}), 404
-        client_image_name = terminals[terminal_id]._compose_manager._client_image_name
-        task_name = task_paths[terminal_id].input_path.parts[-1]
-        if terminal_id not in rollout_env_id:
-            print("Rollout ID not found for terminal:", terminal_id)
-            return jsonify({"error": "Rollout ID not found for terminal"}), 404
-        rollout_id = rollout_env_id[terminal_id]
-        if terminal_id not in sessions:
-            return jsonify({"error": "Session not found"}), 404
-        session = sessions[terminal_id]
-
-    if enable_caching:
-        old_pane_log = get_pane_logs_local(terminal_id)
-        session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
-
-    container_names = get_all_container_by_id(rollout_id)
-    with fork_save_lock:
-        image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
-    if commit_error:
-        return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
-    new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
-
+def startup_container_from_image(rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log):
     client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
     docker_compose_path = new_task_dir / 'docker-compose.yaml'
     new_client_image_name = f'{client_image_name}'
@@ -237,6 +206,107 @@ def fork_terminal():
     except Exception as e:
         print(f"Error forking terminal: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def _startup_container_worker(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id):
+    """Worker function to start container from image in background thread."""
+    try:
+        client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
+        docker_compose_path = new_task_dir / 'docker-compose.yaml'
+        new_client_image_name = f'{client_image_name}'
+        new_client_container_name = f'{new_client_image_name}_container'
+        docker_image_name_prefix = f'{new_client_image_name}_docker'
+
+        trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(new_rollout_id))
+        trial_paths.mkdir()
+
+        new_terminal = Terminal(
+            client_container_name=new_client_container_name,
+            client_image_name=new_client_image_name,
+            docker_image_name_prefix=docker_image_name_prefix,
+            docker_compose_path=docker_compose_path,
+            sessions_logs_path=trial_paths.sessions_path,
+            agent_logs_path=trial_paths.agent_logging_dir,
+            commands_path=trial_paths.commands_path,
+            no_rebuild=False,
+            cleanup=True,
+            livestream=False,
+            disable_recording=False,
+        )
+        new_terminal.start()
+        
+        # Delete committed images after starting
+        del_result = delete_committed_images(image_names)
+        if del_result:
+            print(f"Error deleting images: {del_result.stderr}")
+        
+        new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
+        
+        with state_lock:
+            task_dir_env_id[new_terminal_id] = str(new_task_dir)
+            rollout_env_id[new_terminal_id] = new_rollout_id
+            terminals[new_terminal_id] = new_terminal
+            sessions[new_terminal_id] = new_session
+            trial_path[new_terminal_id] = trial_paths 
+            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))
+            panelog_forked_terminal_dict[new_terminal_id] = old_pane_log
+
+        if enable_caching:
+            new_session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
+        
+        print(f"Successfully started forked container with terminal ID: {new_terminal_id}")
+    except Exception as e:
+        print(f"Error starting forked container in background: {e}")
+
+@app.route('/fork', methods=['POST'])
+def fork_terminal():
+    data = request.json
+    if "id" not in data:
+        return jsonify({"error": "No terminal id provided"}), 400
+    terminal_id = data['id']
+    new_rollout_id = str(uuid.uuid4())
+    new_terminal_id = str(uuid.uuid4())
+    
+    with state_lock:
+        if terminal_id not in terminals:
+            print("Terminal not found:", terminal_id)
+            return jsonify({"error": "Terminal not found"}), 404
+        client_image_name = terminals[terminal_id]._compose_manager._client_image_name
+        task_name = task_paths[terminal_id].input_path.parts[-1]
+        if terminal_id not in rollout_env_id:
+            print("Rollout ID not found for terminal:", terminal_id)
+            return jsonify({"error": "Rollout ID not found for terminal"}), 404
+        rollout_id = rollout_env_id[terminal_id]
+        if terminal_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+        session = sessions[terminal_id]
+
+    if enable_caching:
+        old_pane_log = get_pane_logs_local(terminal_id)
+        session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
+    else:
+        old_pane_log = ""
+
+    # Critical path: only commit containers
+    container_names = get_all_container_by_id(rollout_id)
+    with fork_save_lock:
+        image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
+    if commit_error:
+        return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
+    
+    new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
+
+    # Start container in background thread - non-blocking
+    startup_thread = threading.Thread(
+        target=_startup_container_worker,
+        args=(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id),
+        daemon=True
+    )
+    startup_thread.start()
+    
+    # Return immediately with new terminal ID
+    print(f"Fork request processed, starting container in background for terminal ID: {new_terminal_id}")
+    return jsonify({"id": new_terminal_id}), 200
 
 """
 Stop a terminal session.
