@@ -4,7 +4,7 @@ from terminal_bench.handlers.trial_handler import TrialPaths, TaskPaths, Task
 from pathlib import Path
 import uuid
 import subprocess
-from typing import Dict
+from typing import Dict, Set
 from terminal_bench.terminal.tmux_session import TmuxSession
 from terminal_bench.terminal.docker_compose_manager import DockerComposeManager
 from terminal_bench.parsers.parser_factory import ParserFactory, ParserName
@@ -29,6 +29,8 @@ terminals: Dict[str, Terminal] = {}
 sessions: Dict[str, TmuxSession] = {}
 trial_path: Dict[str, TrialPaths] = {}
 task_paths: Dict[str, TaskPaths] = {}
+ongoing_forks: Set[str] = set()
+
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
 # path = "../env_bench/tasks"
 rollout_env_id = {}
@@ -256,6 +258,10 @@ def _startup_container_worker(client_image_name, rollout_id, new_rollout_id, new
         if enable_caching:
             new_session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
         
+        with state_lock:
+            if new_terminal_id in ongoing_forks:
+                ongoing_forks.remove(new_terminal_id)
+        
         print(f"Successfully started forked container with terminal ID: {new_terminal_id}")
     except Exception as e:
         print(f"Error starting forked container in background: {e}")
@@ -314,6 +320,74 @@ def priority_fork_terminal():
         print(f"Priority fork request processed, starting container in background for terminal ID: {new_terminal_id}")
         priority_fork_requested = False
         return jsonify({"id": new_terminal_id}), 200
+
+@app.route('/done_forking', methods=['POST'])
+def done_forking():
+    data = request.json
+    if "id" not in data:
+        return jsonify({"error": "No terminal id provided to check done forking"}), 400
+    
+    terminal_id = data['id']
+
+    with state_lock:
+        exists = terminal_id in ongoing_forks
+        done = not exists
+        return jsonify({"done": done}), 200
+
+@app.route('/fork_async', methods=['POST'])
+def async_terminal():
+    data = request.json
+    if "id" not in data:
+        return jsonify({"error": "No terminal id provided"}), 400
+    
+    terminal_id = data['id']
+    new_rollout_id = str(uuid.uuid4())
+    new_terminal_id = str(uuid.uuid4())
+    
+    with state_lock:
+        if terminal_id not in terminals:
+            print("Terminal not found:", terminal_id)
+            return jsonify({"error": "Terminal not found"}), 404
+        
+        client_image_name = terminals[terminal_id]._compose_manager._client_image_name
+        task_name = task_paths[terminal_id].input_path.parts[-1]
+
+        if terminal_id not in rollout_env_id:
+            print("Rollout ID not found for terminal:", terminal_id)
+            return jsonify({"error": "Rollout ID not found for terminal"}), 404
+        
+        rollout_id = rollout_env_id[terminal_id]
+        if terminal_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+        
+        session = sessions[terminal_id]
+    
+    with fork_lock:
+
+        if enable_caching:
+            old_pane_log = get_pane_logs_local(terminal_id)
+            session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
+        else:
+            old_pane_log = ""
+
+        container_names = get_all_container_by_id(rollout_id)
+        image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
+        if commit_error:
+            return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
+        
+        new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
+    
+    with state_lock:
+        ongoing_forks.add(new_terminal_id)
+    
+    startup_thread = threading.Thread(
+        target=_startup_container_worker,
+        args=(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id),
+        daemon=True
+    )
+    startup_thread.start()
+
+    return jsonify({"id": new_terminal_id}), 200
 
 @app.route('/fork', methods=['POST'])
 def fork_terminal():
