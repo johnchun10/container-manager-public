@@ -343,6 +343,12 @@ def async_terminal():
     terminal_id = data['id']
     new_rollout_id = str(uuid.uuid4())
     new_terminal_id = str(uuid.uuid4())
+    global priority_fork_requested
+    if priority_fork_requested:
+        logger.info("Priority fork in progress, waiting to start async fork")
+        time.sleep(1)
+        priority_fork_requested = False
+
     
     with state_lock:
         if terminal_id not in terminals:
@@ -398,51 +404,39 @@ def fork_terminal():
     terminal_id = data['id']
     new_rollout_id = str(uuid.uuid4())
     new_terminal_id = str(uuid.uuid4())
-    
-    # Wait if priority fork is in progress
-    while priority_fork_requested:
-        time.sleep(0.1)
-    with fork_lock:
-        with state_lock:
-            if terminal_id not in terminals:
-                print("Terminal not found:", terminal_id)
-                return jsonify({"error": "Terminal not found"}), 404
-            client_image_name = terminals[terminal_id]._compose_manager._client_image_name
-            task_name = task_paths[terminal_id].input_path.parts[-1]
-            if terminal_id not in rollout_env_id:
-                print("Rollout ID not found for terminal:", terminal_id)
-                return jsonify({"error": "Rollout ID not found for terminal"}), 404
-            rollout_id = rollout_env_id[terminal_id]
-            if terminal_id not in sessions:
-                return jsonify({"error": "Session not found"}), 404
-            session = sessions[terminal_id]
 
-        if enable_caching:
-            old_pane_log = get_pane_logs_local(terminal_id)
-            session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
-        else:
-            old_pane_log = ""
+    with state_lock:
+        if terminal_id not in terminals:
+            print("Terminal not found:", terminal_id)
+            return jsonify({"error": "Terminal not found"}), 404
+        client_image_name = terminals[terminal_id]._compose_manager._client_image_name
+        task_name = task_paths[terminal_id].input_path.parts[-1]
+        if terminal_id not in rollout_env_id:
+            print("Rollout ID not found for terminal:", terminal_id)
+            return jsonify({"error": "Rollout ID not found for terminal"}), 404
+        rollout_id = rollout_env_id[terminal_id]
+        if terminal_id not in sessions:
+            return jsonify({"error": "Session not found"}), 404
+        session = sessions[terminal_id]
 
-        # Critical path: only commit containers
-        container_names = get_all_container_by_id(rollout_id)
-        with fork_save_lock:
-            image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
+    if enable_caching:
+        old_pane_log = get_pane_logs_local(terminal_id)
+        session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
+    else:
+        old_pane_log = ""
+
+    container_names = get_all_container_by_id(rollout_id)
+
+    with fork_save_lock:
+        image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
         if commit_error:
             return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
-        
-        new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
 
-        # Start container in background thread - non-blocking
-        startup_thread = threading.Thread(
-            target=_startup_container_worker,
-            args=(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id),
-            daemon=True
-        )
-        startup_thread.start()
-    
-        # Return immediately with new terminal ID
-        print(f"Fork request processed, starting container in background for terminal ID: {new_terminal_id}")
-        return jsonify({"id": new_terminal_id}), 200
+    new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
+    _startup_container_worker(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id)
+
+
+    return jsonify({"id": new_terminal_id}), 200
 
 """
 Stop a terminal session.
