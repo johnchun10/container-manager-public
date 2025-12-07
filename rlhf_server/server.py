@@ -345,7 +345,7 @@ def async_terminal():
     new_terminal_id = str(uuid.uuid4())
     global priority_fork_requested
     if priority_fork_requested:
-        logger.info("Priority fork in progress, waiting to start async fork")
+        print("Priority fork in progress, waiting to start async fork")
         time.sleep(1)
         priority_fork_requested = False
 
