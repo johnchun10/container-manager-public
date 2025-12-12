@@ -10,7 +10,7 @@ container_resurrect_path = CONTAINER_RESURRECT_PATH
 BASE_DIR = Path(__file__).resolve().parent
 LOCAL_RESURRECT_PATH = os.getenv(
     "LOCAL_RESURRECT_PATH",
-    str(BASE_DIR / "tmux_res"),  # tmux-res directory next to server.py
+    str(BASE_DIR / "tmux-res"),  # tmux-res directory next to server.py
 )
 def setup_tmux_res_in_container(container_name: str):
     """Copy the tmux resurrect files to the specified container."""

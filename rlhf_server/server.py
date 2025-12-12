@@ -20,6 +20,9 @@ import os
 import re
 from tmux import *
 from fork import *
+from fork_pipeline import ForkPipeline
+from deletion_pipeline import DeletionPipeline
+
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
 app = Flask(__name__)
@@ -44,7 +47,6 @@ state_lock = threading.Lock()
 fork_save_lock = threading.Lock()
 hash_lock = threading.Lock()
 fork_lock = threading.Lock()
-priority_fork_requested = False
 
 # path = "/home/bk478/susRL/tv-cache/data/appworld-train"
 # path = "../tasks"
@@ -53,14 +55,27 @@ FLASK_PORT = int(os.getenv("FLASK_PORT", "9901"))
 path = TASKS_ROOT
 enable_caching = os.getenv("ENABLE_CACHING", "0") == "1"
 enable_hashing = False
-"""
-Start a new terminal session.
-Arguments:
-- task_name: name of the task (str)
-- rollout_id: unique id for the rollout (str)
-Returns:
-- id: unique id for the terminal session (str)
-"""
+
+
+fork_pipeline = ForkPipeline(
+    terminals=terminals,
+    state_lock=state_lock,
+    sessions=sessions,
+    last_executed_command=last_executed_command,
+    panelog_forked_terminal_dict=panelog_forked_terminal_dict,
+    task_paths=task_paths,
+    rollout_env_id=rollout_env_id,
+    task_dir_env_id=task_dir_env_id,
+    trial_path=trial_path
+)
+
+deletion_pipeline = DeletionPipeline(
+    terminals=terminals,
+    state_lock=state_lock
+)
+
+
+
 @app.route('/start', methods=['POST'])
 def start_terminal():
     start_time = time.perf_counter()
@@ -72,7 +87,7 @@ def start_terminal():
     else:
         rollout_id = data['rollout_id']
     
-    terminal_id = str(uuid.uuid4())
+    terminal_id = f'term_{rollout_id}'
     
     docker_compose_path = Path(f"{path}/{task_name}/docker-compose.yaml")
     if not docker_compose_path.exists():
@@ -267,60 +282,6 @@ def _startup_container_worker(client_image_name, rollout_id, new_rollout_id, new
         print(f"Error starting forked container in background: {e}")
 
 
-@app.route('/priority_fork', methods=['POST'])
-def priority_fork_terminal():
-    global priority_fork_requested
-    priority_fork_requested = True
-    with fork_lock:
-        data = request.json
-        if "id" not in data:
-            return jsonify({"error": "No terminal id provided"}), 400
-        terminal_id = data['id']
-        new_rollout_id = str(uuid.uuid4())
-        new_terminal_id = str(uuid.uuid4())
-        
-        with state_lock:
-            if terminal_id not in terminals:
-                print("Terminal not found:", terminal_id)
-                return jsonify({"error": "Terminal not found"}), 404
-            client_image_name = terminals[terminal_id]._compose_manager._client_image_name
-            task_name = task_paths[terminal_id].input_path.parts[-1]
-            if terminal_id not in rollout_env_id:
-                print("Rollout ID not found for terminal:", terminal_id)
-                return jsonify({"error": "Rollout ID not found for terminal"}), 404
-            rollout_id = rollout_env_id[terminal_id]
-            if terminal_id not in sessions:
-                return jsonify({"error": "Session not found"}), 404
-            session = sessions[terminal_id]
-
-        if enable_caching:
-            old_pane_log = get_pane_logs_local(terminal_id)
-            session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
-        else:
-            old_pane_log = ""
-
-        # Critical path: only commit containers
-        container_names = get_all_container_by_id(rollout_id)
-        with fork_save_lock:
-            image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
-        if commit_error:
-            return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
-        
-        new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
-
-        # Start container in background thread - non-blocking
-        startup_thread = threading.Thread(
-            target=_startup_container_worker,
-            args=(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id),
-            daemon=True
-        )
-        startup_thread.start()
-        
-        # Return immediately with new terminal ID
-        print(f"Priority fork request processed, starting container in background for terminal ID: {new_terminal_id}")
-        priority_fork_requested = False
-        return jsonify({"id": new_terminal_id}), 200
-
 @app.route('/done_forking', methods=['POST'])
 def done_forking():
     data = request.json
@@ -341,100 +302,20 @@ def async_terminal():
         return jsonify({"error": "No terminal id provided"}), 400
     
     terminal_id = data['id']
-    new_rollout_id = str(uuid.uuid4())
-    new_terminal_id = str(uuid.uuid4())
-    global priority_fork_requested
-    if priority_fork_requested:
-        print("Priority fork in progress, waiting to start async fork")
-        time.sleep(1)
-        priority_fork_requested = False
-
     
-    with state_lock:
-        if terminal_id not in terminals:
-            print("Terminal not found:", terminal_id)
-            return jsonify({"error": "Terminal not found"}), 404
-        
-        client_image_name = terminals[terminal_id]._compose_manager._client_image_name
-        task_name = task_paths[terminal_id].input_path.parts[-1]
+    asyn_commit_id = fork_pipeline.fork_async(terminal_id=terminal_id)
 
-        if terminal_id not in rollout_env_id:
-            print("Rollout ID not found for terminal:", terminal_id)
-            return jsonify({"error": "Rollout ID not found for terminal"}), 404
-        
-        rollout_id = rollout_env_id[terminal_id]
-        if terminal_id not in sessions:
-            return jsonify({"error": "Session not found"}), 404
-        
-        session = sessions[terminal_id]
-    
-    with fork_lock:
-
-        if enable_caching:
-            old_pane_log = get_pane_logs_local(terminal_id)
-            session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
-        else:
-            old_pane_log = ""
-
-        container_names = get_all_container_by_id(rollout_id)
-        image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
-        if commit_error:
-            return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
-        
-        new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
-    
-    with state_lock:
-        ongoing_forks.add(new_terminal_id)
-    
-    startup_thread = threading.Thread(
-        target=_startup_container_worker,
-        args=(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id),
-        daemon=True
-    )
-    startup_thread.start()
-
-    return jsonify({"id": new_terminal_id}), 200
+    return jsonify({"id": asyn_commit_id}), 200
 
 @app.route('/fork', methods=['POST'])
 def fork_terminal():
-    global priority_fork_requested
+
     data = request.json
     if "id" not in data:
         return jsonify({"error": "No terminal id provided"}), 400
     terminal_id = data['id']
-    new_rollout_id = str(uuid.uuid4())
-    new_terminal_id = str(uuid.uuid4())
-
-    with state_lock:
-        if terminal_id not in terminals:
-            print("Terminal not found:", terminal_id)
-            return jsonify({"error": "Terminal not found"}), 404
-        client_image_name = terminals[terminal_id]._compose_manager._client_image_name
-        task_name = task_paths[terminal_id].input_path.parts[-1]
-        if terminal_id not in rollout_env_id:
-            print("Rollout ID not found for terminal:", terminal_id)
-            return jsonify({"error": "Rollout ID not found for terminal"}), 404
-        rollout_id = rollout_env_id[terminal_id]
-        if terminal_id not in sessions:
-            return jsonify({"error": "Session not found"}), 404
-        session = sessions[terminal_id]
-
-    if enable_caching:
-        old_pane_log = get_pane_logs_local(terminal_id)
-        session.send_keys([f"{container_resurrect_path}/scripts/exit.sh", 'Enter'], min_timeout_sec=0.)
-    else:
-        old_pane_log = ""
-
-    container_names = get_all_container_by_id(rollout_id)
-
-    with fork_save_lock:
-        image_names, commit_error = commit_container(container_names, rollout_id, new_rollout_id)
-        if commit_error:
-            return jsonify({"error": f"Failed to commit containers: {commit_error.stderr}"}), 500
-
-    new_task_dir = create_forked_task_dir(image_names, task_name, terminal_id)
-    _startup_container_worker(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id)
-
+    
+    new_terminal_id = fork_pipeline.fork_priority(terminal_id=terminal_id)
 
     return jsonify({"id": new_terminal_id}), 200
 
@@ -450,14 +331,15 @@ def stop_terminal():
     data = request.json
     terminal_id = data['id']
 
-    with state_lock:
-        if terminal_id not in terminals:
-            print("Received stop request, but terminal not found:", terminal_id)
-            return jsonify({"error": "Terminal not found"}), 404
-        terminal = terminals[terminal_id]
+    # with state_lock:
+    #     if terminal_id not in terminals:
+    #         print("Received stop request, but terminal not found:", terminal_id)
+    #         return jsonify({"error": "Terminal not found"}), 404
+    #     terminal = terminals[terminal_id]
     
     try:
-        terminal.stop()
+        # terminal.stop()
+        deletion_pipeline.stop(terminal_id)
         
         with state_lock:
             del terminals[terminal_id]
@@ -705,6 +587,7 @@ def get_pane_logs():
         print(f"Error getting pane logs: {e} for terminal {terminal_id}")
         return jsonify({"error": str(e)}), 500
 
+
 @app.route('/test', methods=['POST'])
 def run_tests():
     data = request.json
@@ -807,35 +690,11 @@ def solve():
         print(f"Error solving terminal {terminal_id}: {error}")
         return jsonify({'solved': "Error: {}".format(error)}), 500
 
+
 @app.route('/hash', methods=['POST'])
 def hash():
     return jsonify({'hash': "1111"})
-    data = request.json
-    terminal_id = data['id']
-
-    with state_lock:
-        if terminal_id in terminals:
-            terminal = terminals[terminal_id]
-        else:
-            return jsonify({'error': 'Terminal with id {} not found'.format(terminal_id)})
     
-    try:
-        hash = terminal.get_hash()
-        if hash == "0000":
-            with state_lock and hash_lock:
-                if terminal_id in terminal_state_dict:
-                    if terminal_state_dict[terminal_id] == "stateful":
-                        return jsonify({'hash': "1111"})
-                    else:
-                        return jsonify({'hash': "0000"})
-                else:
-                    print(f"State not updated yet for terminal {terminal_id}, returning stateful hash")
-                    return jsonify({'hash': "1111"})
-
-        return jsonify({'hash': hash})
-    except Exception as e:
-        print(f"Error getting hash for terminal {terminal_id}: {e}")
-        return jsonify({'hash': 'error'})
 
 if __name__ == '__main__':
     print(f"Starting RLHF server on port {FLASK_PORT} with tasks root {TASKS_ROOT} and caching set to {enable_caching}")
