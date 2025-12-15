@@ -19,6 +19,7 @@ import time
 
 WAIT_TIME_OUT = 0.25
 MAX_PARALLELISM = 20
+MAX_RETRIES = 3
 
 class ContainerStartArgs:
     def __init__(
@@ -49,6 +50,8 @@ class ForkRequest:
         self.commit_complete = False
         self.fork_complete = False
         self.priority = False
+        self.id = str(uuid.uuid4())
+        self.error = None
 
     @property
     def new_terminal_id(self):
@@ -132,7 +135,7 @@ class ForkPipeline:
             st = time.perf_counter()
             self.commit_container(fork_req)
             et = time.perf_counter()
-            print(f'Time taken to commit container: {et - st} seconds. The container is {fork_req.terminal_id}')
+            print(f'Time taken to commit container: {et - st} seconds. The container is {fork_req.id}')
         except Exception as e:
             print(f"Error in commit_container for terminal {fork_req.terminal_id}: {e}")
         finally:
@@ -242,14 +245,26 @@ class ForkPipeline:
         image_names = []
         for container_name in container_names:
             new_container_name = container_name.replace(old_rollout_id, new_rollout_id)
-            commit_result = subprocess.run(
-                ['docker', 'commit',  '--pause=false', container_name, f'{new_container_name}'],
-                capture_output=True, text=True
-            )
+
+            # Retry logic for docker commit
+            commit_result = None
+            for attempt in range(MAX_RETRIES):
+                commit_result = subprocess.run(
+                    ['docker', 'commit',  '--no-pause', container_name, f'{new_container_name}'],
+                    capture_output=True, text=True
+                )
+
+                if commit_result.returncode == 0:
+                    break
+
+                if attempt < MAX_RETRIES - 1:
+                    print(f"Docker commit failed for {container_name} (attempt {attempt + 1}/{MAX_RETRIES}). Retrying...")
+                    time.sleep(1)  # Brief delay before retry
 
             if commit_result.returncode != 0:
+                print(f"Docker commit failed for {container_name} after {MAX_RETRIES} attempts")
                 return None, commit_result
-            
+
             image_names.append(f'{new_container_name}')
             commit_results.append(commit_result)
         return image_names, None
@@ -299,6 +314,8 @@ class ForkPipeline:
         new_terminal_id = f'term_{new_rollout_id}'
         terminal_id = fork_request.terminal_id
 
+        print(f'Committing {fork_request.id} after getting it from queue')
+
         with self.state_lock:
             if terminal_id not in self.terminals:
                 raise ValueError(f"Terminal {terminal_id} not found")
@@ -316,6 +333,7 @@ class ForkPipeline:
             
             session = self.sessions[terminal_id]
         
+        print(f'Committing {fork_request.id} 2 after getting it from queue')
 
         if self.enable_caching:
             old_pane_log = self.get_pane_logs_local(terminal_id)
@@ -323,17 +341,26 @@ class ForkPipeline:
         else:
             old_pane_log = ""
 
+        print(f'Committing {fork_request.id} 3 after getting it from queue')
+
         container_names = get_all_container_by_id(rollout_id)
+        print(f'Committing {fork_request.id} 3.1 after getting it from queue')
         image_names, commit_error = self.call_docker_commit(container_names, rollout_id, new_rollout_id)
+        if commit_error != None:
+            print(f'Committing {fork_request.id} 3.1.2 after getting it from queue, commit error: {commit_error.stdout} and {commit_error.stderr}')
+        print(f'Committing {fork_request.id} 3.2 after getting it from queue')
+
         if commit_error:
             return f"Failed to commit containers: {commit_error.stderr}"
         
+        print(f'Committing {fork_request.id} 4 after getting it from queue')
         new_task_dir = self.create_forked_task_dir(image_names, task_name, terminal_id)
         
         container_start_args = ContainerStartArgs(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id)
         fork_request.container_start_args = container_start_args
 
         with self.startup_q_lock:
+            print(f'Added {fork_request.id} to startup queue')
             if fork_request.priority:
                 self.startup_queue.appendleft(fork_request)
             else:
@@ -353,55 +380,66 @@ class ForkPipeline:
         old_pane_log = args.old_pane_log
         new_terminal_id = args.new_terminal_id
 
-        try:
-            client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
-            docker_compose_path = new_task_dir / 'docker-compose.yaml'
-            new_client_image_name = f'{client_image_name}'
-            new_client_container_name = f'{new_client_image_name}_container'
-            docker_image_name_prefix = f'{new_client_image_name}_docker'
+        # Retry logic for starting container
+        for attempt in range(MAX_RETRIES):
+            try:
+                print(f'Starting {fork_request.id} after getting it from startup queue (attempt {attempt + 1}/{MAX_RETRIES})')
+                client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
+                docker_compose_path = new_task_dir / 'docker-compose.yaml'
+                new_client_image_name = f'{client_image_name}'
+                new_client_container_name = f'{new_client_image_name}_container'
+                docker_image_name_prefix = f'{new_client_image_name}_docker'
 
-            trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(new_rollout_id))
-            trial_paths.mkdir()
+                trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(new_rollout_id))
+                trial_paths.mkdir()
 
-            new_terminal = Terminal(
-                client_container_name=new_client_container_name,
-                client_image_name=new_client_image_name,
-                docker_image_name_prefix=docker_image_name_prefix,
-                docker_compose_path=docker_compose_path,
-                sessions_logs_path=trial_paths.sessions_path,
-                agent_logs_path=trial_paths.agent_logging_dir,
-                commands_path=trial_paths.commands_path,
-                no_rebuild=False,
-                cleanup=True,
-                livestream=False,
-                disable_recording=False,
-            )
-            new_terminal.start()
-            
-            # Delete committed images after starting
-            # TODO: Move this somewhere else
-            with self.delete_q_lock:
-                self.delete_queue.extend(image_names)
-            
-            
-            new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
-            
-            with self.state_lock:
-                self.task_dir_env_id[new_terminal_id] = str(new_task_dir)
-                self.rollout_env_id[new_terminal_id] = new_rollout_id
-                self.terminals[new_terminal_id] = new_terminal
-                self.sessions[new_terminal_id] = new_session
-                self.trial_path[new_terminal_id] = trial_paths 
-                self.task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))
-                self.panelog_forked_terminal_dict[new_terminal_id] = old_pane_log
+                new_terminal = Terminal(
+                    client_container_name=new_client_container_name,
+                    client_image_name=new_client_image_name,
+                    docker_image_name_prefix=docker_image_name_prefix,
+                    docker_compose_path=docker_compose_path,
+                    sessions_logs_path=trial_paths.sessions_path,
+                    agent_logs_path=trial_paths.agent_logging_dir,
+                    commands_path=trial_paths.commands_path,
+                    no_rebuild=False,
+                    cleanup=True,
+                    livestream=False,
+                    disable_recording=False,
+                )
+                new_terminal.start()
 
-            if self.enable_caching:
-                new_session.send_keys([f"source {self.container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
+                # Delete committed images after starting
+                # TODO: Move this somewhere else
+                with self.delete_q_lock:
+                    self.delete_queue.extend(image_names)
 
-            print(f"Successfully started forked container with terminal ID: {new_terminal_id}")
-            fork_request.fork_complete = True
-        except Exception as e:
-            print(f"Error starting forked container in background: {e}")
+
+                new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
+
+                with self.state_lock:
+                    self.task_dir_env_id[new_terminal_id] = str(new_task_dir)
+                    self.rollout_env_id[new_terminal_id] = new_rollout_id
+                    self.terminals[new_terminal_id] = new_terminal
+                    self.sessions[new_terminal_id] = new_session
+                    self.trial_path[new_terminal_id] = trial_paths
+                    self.task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))
+                    self.panelog_forked_terminal_dict[new_terminal_id] = old_pane_log
+
+                if self.enable_caching:
+                    new_session.send_keys([f"source {self.container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
+
+                print(f"Successfully started forked container with terminal ID: {fork_request.id}")
+                fork_request.fork_complete = True
+                break  # Success, exit retry loop
+
+            except Exception as e:
+                print(f"Error starting forked container in background (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                if attempt < MAX_RETRIES - 1:
+                    print(f"Retrying in 2 seconds...")
+                    time.sleep(2)  # Delay before retry
+                else:
+                    print(f"Failed to start container after {MAX_RETRIES} attempts")
+                    fork_request.error = str(e)
     
 
     def fork_priority(self, terminal_id) -> str:
@@ -413,7 +451,7 @@ class ForkPipeline:
             self.commit_queue.appendleft(fork_req)
         
         while not fork_req.fork_complete:
-            print(f'Waiting for {terminal_id} fork to complete')
+            print(f'Waiting for {fork_req.id} fork to complete')
             time.sleep(WAIT_TIME_OUT)
         
         assert fork_req.new_terminal_id != None

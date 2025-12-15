@@ -146,7 +146,7 @@ class DockerComposeManager:
     def stop(self) -> None:
         """Stop and remove the docker compose services."""
         try:
-            self._run_docker_compose_command(["down"])
+            self._run_docker_compose_command(["down", "-t", "1"])
 
             if self._cleanup:
                 self._run_docker_compose_command(["down", "--rmi", "all", "--volumes"])
