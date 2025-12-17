@@ -52,10 +52,14 @@ class ForkRequest:
         self.priority = False
         self.id = str(uuid.uuid4())
         self.error = None
-
+    
     @property
     def new_terminal_id(self):
-        return self.container_start_args.new_terminal_id if self.container_start_args else None
+        return f'term_{self.id}'
+
+    @property
+    def new_rollout_id(self):
+        return self.id
 
 
 class ForkPipeline:
@@ -310,8 +314,9 @@ class ForkPipeline:
 
 
     def commit_container(self, fork_request: ForkRequest):
-        new_rollout_id = str(uuid.uuid4())
-        new_terminal_id = f'term_{new_rollout_id}'
+        new_rollout_id = fork_request.new_rollout_id
+        new_terminal_id = fork_request.new_terminal_id
+
         terminal_id = fork_request.terminal_id
 
         print(f'Committing {fork_request.id} after getting it from queue')
@@ -466,11 +471,8 @@ class ForkPipeline:
             self.commit_queue.append(fork_req)
         
         with self.total_forks_lock:
-            fork_req_id = f'fork_{self.total_forks}'
-            # TODO: This will break if the number of forks increases beyond integer's range
-            self.total_forks += 1
-            self.ongoing_forks[fork_req_id] = fork_req
-            return fork_req_id
+            self.ongoing_forks[fork_req.new_terminal_id] = fork_req
+            return fork_req.new_terminal_id
     
 
     def check_fork_complete(self, fork_rq_id) -> str:
