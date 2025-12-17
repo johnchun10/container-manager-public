@@ -99,8 +99,6 @@ class ForkPipeline:
         self.delete_q_lock: Lock = Lock()
 
         self.ongoing_forks: Dict[str, ForkRequest] = {}
-        self.total_forks: int = 0
-        self.total_forks_lock: Lock = Lock()
 
         # Semaphores to enforce parallelism limit per operation
         self.commit_semaphore = Semaphore(MAX_PARALLELISM)
@@ -470,14 +468,14 @@ class ForkPipeline:
         with self.commit_q_lock:
             self.commit_queue.append(fork_req)
         
-        with self.total_forks_lock:
+        with self.state_lock:
             self.ongoing_forks[fork_req.new_terminal_id] = fork_req
             return fork_req.new_terminal_id
     
 
     def check_fork_complete(self, fork_rq_id) -> str:
         """Returns the new terminal id if forking has completed, None otherwise"""
-        with self.total_forks_lock:
+        with self.state_lock:
             if fork_rq_id in self.ongoing_forks:
                 if self.ongoing_forks[fork_rq_id].fork_complete:
                     return self.ongoing_forks[fork_rq_id].new_terminal_id

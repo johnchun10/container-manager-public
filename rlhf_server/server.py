@@ -288,12 +288,14 @@ def done_forking():
     if "id" not in data:
         return jsonify({"error": "No terminal id provided to check done forking"}), 400
     
-    terminal_id = data['id']
+    new_terminal_id = data['id']
 
-    with state_lock:
-        exists = terminal_id in ongoing_forks
-        done = not exists
-        return jsonify({"done": done}), 200
+    done_terminal_id = fork_pipeline.check_fork_complete(new_terminal_id)
+
+    done = done_terminal_id == new_terminal_id
+    
+    return jsonify({"done": done}), 200
+
 
 @app.route('/fork_async', methods=['POST'])
 def async_terminal():
@@ -303,9 +305,11 @@ def async_terminal():
     
     terminal_id = data['id']
     
-    asyn_commit_id = fork_pipeline.fork_async(terminal_id=terminal_id)
+    async_commit_id = fork_pipeline.fork_async(terminal_id=terminal_id)
+    # async_commit_id is also the new terminal Id
 
-    return jsonify({"id": asyn_commit_id}), 200
+    return jsonify({"id": async_commit_id}), 200
+
 
 @app.route('/fork', methods=['POST'])
 def fork_terminal():
