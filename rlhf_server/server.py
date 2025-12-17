@@ -19,9 +19,11 @@ import threading
 import os
 import re
 from tmux import *
-from fork import *
-from fork_pipeline import ForkPipeline
-from deletion_pipeline import DeletionPipeline
+from rlhf_server.fork.fork_utils import *
+from rlhf_server.fork.fork_pipeline import ForkPipeline
+from rlhf_server.delete.deletion_pipeline import DeletionPipeline
+from rlhf_server.networks.bridge_networks import BridgeNetworks
+from rlhf_server.networks.network_utils import does_container_need_bridge_network
 
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
@@ -41,6 +43,7 @@ task_dir_env_id = {}
 terminal_state_dict = {}
 last_executed_command = {}
 panelog_forked_terminal_dict = {}
+terminal_to_network: Dict[str, str] = {}
 
 # Single lock for all dictionaries
 state_lock = threading.Lock()
@@ -57,6 +60,8 @@ enable_caching = os.getenv("ENABLE_CACHING", "0") == "1"
 enable_hashing = False
 
 
+bridge_networks = BridgeNetworks(100)
+
 fork_pipeline = ForkPipeline(
     terminals=terminals,
     state_lock=state_lock,
@@ -66,7 +71,9 @@ fork_pipeline = ForkPipeline(
     task_paths=task_paths,
     rollout_env_id=rollout_env_id,
     task_dir_env_id=task_dir_env_id,
-    trial_path=trial_path
+    trial_path=trial_path,
+    terminal_to_network=terminal_to_network,
+    bridge_networks=bridge_networks
 )
 
 deletion_pipeline = DeletionPipeline(
@@ -100,7 +107,16 @@ def start_terminal():
     
     trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(rollout_id))
     trial_paths.mkdir()
-    
+
+    bridge_network_name = None
+    network_required = does_container_need_bridge_network(docker_compose_path)
+
+    if network_required:
+        bridge_network_name = bridge_networks.get_network()
+        print(f'Compose file at {docker_compose_path} needs bridge network, so using {bridge_network_name}')
+        with state_lock:
+            terminal_to_network[terminal_id] = bridge_network_name
+
     terminal = Terminal(
         client_container_name=client_container_name,
         client_image_name=client_image_name,
@@ -113,9 +129,11 @@ def start_terminal():
         cleanup=True,
         livestream=False,
         disable_recording=True,
+        bridge_network_name=bridge_network_name
     )
     end_time = time.perf_counter()
     print(f"Initialized terminal in {(end_time - start_time):.2f} seconds")
+
     try:
         st = time.perf_counter()
         terminal.start()
@@ -143,143 +161,6 @@ def start_terminal():
     except Exception as e:
         print(f"Error starting terminal for task {task_name}: {e}")
         return jsonify({"error": str(e)}), 500
-
-
-def create_forked_task_dir(container_names, task_name, terminal_id):
-    with state_lock:
-        if terminal_id not in task_dir_env_id:
-            print(f"No task directory found for terminal id {terminal_id}, must be first fork")
-            original_task_dir = Path(f"{path}/{task_name}")
-        else:
-            print(f"Using existing task directory for terminal id {terminal_id}")
-            original_task_dir = Path(task_dir_env_id[terminal_id])
-
-    random_string = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    new_task_dir = Path(f"{path}/{task_name}_{random_string}")
-    if new_task_dir.exists():
-        subprocess.run(['rm', '-r', str(new_task_dir)])
-    subprocess.run(['cp', '-r', str(original_task_dir), str(new_task_dir)])
-    docker_compose_path = new_task_dir / 'docker-compose.yaml'
-
-    with open(docker_compose_path, 'r') as f:
-        docker_compose = yaml.safe_load(f)
-    service_names_dict = get_service_name_from_container_name(container_names)
-
-    for service_name, values in docker_compose['services'].items():
-        if service_name in service_names_dict.keys():
-            image_name = service_names_dict[service_name]
-            values['image'] = image_name
-        else:
-            values["image"] = service_names_dict['main']
-
-        if 'build' in values:
-            del values['build']
-    with open(docker_compose_path, 'w') as f:
-        yaml.dump(docker_compose, f)
-    return new_task_dir
-
-def startup_container_from_image(rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log):
-    client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
-    docker_compose_path = new_task_dir / 'docker-compose.yaml'
-    new_client_image_name = f'{client_image_name}'
-    new_client_container_name = f'{new_client_image_name}_container'
-    docker_image_name_prefix = f'{new_client_image_name}_docker'
-
-    trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(new_rollout_id))
-    trial_paths.mkdir()
-
-    try:
-        new_terminal = Terminal(
-            client_container_name=new_client_container_name,
-            client_image_name=new_client_image_name,
-            docker_image_name_prefix=docker_image_name_prefix,
-            docker_compose_path=docker_compose_path,
-            sessions_logs_path=trial_paths.sessions_path,
-            agent_logs_path=trial_paths.agent_logging_dir,
-            commands_path=trial_paths.commands_path,
-            no_rebuild=False,
-            cleanup=True,
-            livestream=False,
-            disable_recording=False,
-        )
-        new_terminal.start()
-        del_result = delete_committed_images(image_names)
-        if del_result:
-            print(f"Error deleting images: {del_result.stderr}")
-        new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
-        new_terminal_id = str(uuid.uuid4())
-        
-        with state_lock:
-            task_dir_env_id[new_terminal_id] = str(new_task_dir)
-            rollout_env_id[new_terminal_id] = new_rollout_id
-            terminals[new_terminal_id] = new_terminal
-            sessions[new_terminal_id] = new_session
-            trial_path[new_terminal_id] = trial_paths 
-            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))
-            panelog_forked_terminal_dict[new_terminal_id] = old_pane_log
-
-        if enable_caching:
-
-            new_session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
-        return jsonify({"id": new_terminal_id}), 200
-    except Exception as e:
-        print(f"Error forking terminal: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-def _startup_container_worker(client_image_name, rollout_id, new_rollout_id, new_task_dir, task_name, image_names, old_pane_log, new_terminal_id):
-    """Worker function to start container from image in background thread."""
-    try:
-        client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
-        docker_compose_path = new_task_dir / 'docker-compose.yaml'
-        new_client_image_name = f'{client_image_name}'
-        new_client_container_name = f'{new_client_image_name}_container'
-        docker_image_name_prefix = f'{new_client_image_name}_docker'
-
-        trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(new_rollout_id))
-        trial_paths.mkdir()
-
-        new_terminal = Terminal(
-            client_container_name=new_client_container_name,
-            client_image_name=new_client_image_name,
-            docker_image_name_prefix=docker_image_name_prefix,
-            docker_compose_path=docker_compose_path,
-            sessions_logs_path=trial_paths.sessions_path,
-            agent_logs_path=trial_paths.agent_logging_dir,
-            commands_path=trial_paths.commands_path,
-            no_rebuild=False,
-            cleanup=True,
-            livestream=False,
-            disable_recording=False,
-        )
-        new_terminal.start()
-        
-        # Delete committed images after starting
-        del_result = delete_committed_images(image_names)
-        if del_result:
-            print(f"Error deleting images: {del_result.stderr}")
-        
-        new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
-        
-        with state_lock:
-            task_dir_env_id[new_terminal_id] = str(new_task_dir)
-            rollout_env_id[new_terminal_id] = new_rollout_id
-            terminals[new_terminal_id] = new_terminal
-            sessions[new_terminal_id] = new_session
-            trial_path[new_terminal_id] = trial_paths 
-            task_paths[new_terminal_id] = TaskPaths(input_path=Path(f"{new_task_dir}"))
-            panelog_forked_terminal_dict[new_terminal_id] = old_pane_log
-
-        if enable_caching:
-            new_session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
-        
-        with state_lock:
-            if new_terminal_id in ongoing_forks:
-                ongoing_forks.remove(new_terminal_id)
-        
-        print(f"Successfully started forked container with terminal ID: {new_terminal_id}")
-    except Exception as e:
-        print(f"Error starting forked container in background: {e}")
 
 
 @app.route('/done_forking', methods=['POST'])
@@ -359,6 +240,10 @@ def stop_terminal():
                 if forked_task_dir.exists():
                     subprocess.run(['rm', '-r', str(forked_task_dir)])
                 del task_dir_env_id[terminal_id]
+            if terminal_id in terminal_to_network:
+                bridge_networks.put_network(terminal_to_network[terminal_id])
+                del terminal_to_network[terminal_id]
+
         return jsonify({"status": "stopped"}), 200
     
     except Exception as e:
@@ -702,4 +587,9 @@ def hash():
 
 if __name__ == '__main__':
     print(f"Starting RLHF server on port {FLASK_PORT} with tasks root {TASKS_ROOT} and caching set to {enable_caching}")
-    app.run(debug=False, host='0.0.0.0', port=FLASK_PORT)
+    try:
+        app.run(debug=False, host='0.0.0.0', port=FLASK_PORT)
+    finally:
+        print("Shutting down server, cleaning up bridge networks...")
+        bridge_networks.delete_networks()
+        print("Cleanup complete.")

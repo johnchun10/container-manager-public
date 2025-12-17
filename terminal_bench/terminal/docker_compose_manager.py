@@ -24,6 +24,7 @@ class DockerComposeEnvVars(EnvModel):
     test_dir: str | None = None
     task_logs_path: str | None = None
     task_agent_logs_path: str | None = None
+    bridge_network_name: str | None = None
 
 
 class DockerComposeManager:
@@ -41,6 +42,7 @@ class DockerComposeManager:
         cleanup: bool = False,
         sessions_logs_path: Path | None = None,
         agent_logs_path: Path | None = None,
+        bridge_network_name: str = None
     ):
         try:
             self._client = docker.from_env()
@@ -61,6 +63,7 @@ class DockerComposeManager:
         self._client_container: Container | None = None
         self._sessions_logs_path = sessions_logs_path
         self._agent_logs_path = agent_logs_path
+        self._bridge_network_name = bridge_network_name
         self._logger = logger.getChild(__name__)
 
         self.env = DockerComposeEnvVars(
@@ -80,6 +83,7 @@ class DockerComposeManager:
                 if self._agent_logs_path is not None
                 else None
             ),
+            bridge_network_name=self._bridge_network_name
         ).to_env_dict(include_os_env=True)
 
     def get_docker_compose_command(self, command: list[str]) -> list[str]:

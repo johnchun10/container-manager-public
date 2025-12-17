@@ -1,3 +1,5 @@
 *.log
 tmux-resurrect-master
 terminal_bench_results.json
+host_tasks
+test.sh

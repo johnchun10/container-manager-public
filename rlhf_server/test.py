@@ -34,6 +34,35 @@ class TerminalBenchServerClient:
         response.raise_for_status()
         new_terminal_id = response.json()["id"]
         return new_terminal_id
+    
+    def async_fork(self, terminal_id: Optional[str] = None) -> str:
+        """Synchronous fork (blocks until complete)"""
+        tid = terminal_id or self.terminal_id
+        if not tid:
+            raise ValueError("No terminal_id provided")
+
+        response = requests.post(
+            f"{self.base_url}/fork_async",
+            json={"id": tid}
+        )
+        response.raise_for_status()
+        new_terminal_id = response.json()["id"]
+        return new_terminal_id
+    
+    def done_forking(self, terminal_id: Optional[str] = None) -> str:
+        
+        tid = terminal_id or self.terminal_id
+        if not tid:
+            raise ValueError("No terminal_id provided")
+
+        response = requests.post(
+            f"{self.base_url}/done_forking",
+            json={"id": tid}
+        )
+        response.raise_for_status()
+        done_forking_response = response.json()["done"]
+
+        return done_forking_response
 
     def stop(self, terminal_id: Optional[str] = None) -> Dict[str, Any]:
         tid = terminal_id or self.terminal_id
@@ -68,6 +97,10 @@ def fork_task_terminals(task_name: str, terminal_id: str, num_forks: int) -> Dic
         def fork_single(i):
             t0 = time.perf_counter()
             new_tid = client.fork(terminal_id)
+            # new_tid = client.async_fork(terminal_id=terminal_id)
+            # while not client.done_forking(terminal_id=new_tid):
+            #     time.sleep(0.2)
+
             duration = time.perf_counter() - t0
             return i, new_tid, duration
 
@@ -142,6 +175,8 @@ if __name__ == "__main__":
     task_names = sorted([d for d in os.listdir(host_tasks_dir) if (host_tasks_dir / d).is_dir()])
     if max_tasks > 0:
         task_names = task_names[:max_tasks]
+    # task_names.append('ancient-puzzle')
+    # task_names.append('broken-python')
 
     print(f"Testing {len(task_names)} tasks with {num_forks_per_task} forks each (ALL IN PARALLEL)\n")
 
@@ -182,6 +217,7 @@ if __name__ == "__main__":
 
     # Phase 3: Stop all containers simultaneously
     print(f"\n{'='*60}\nPhase 3: Stopping all containers simultaneously\n{'='*60}")
+
     all_terminals = []
     for result in fork_results:
         all_terminals.append(result.get("original_terminal"))

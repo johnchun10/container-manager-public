@@ -10,12 +10,14 @@ from threading import Lock, Thread, Semaphore
 import re
 import os
 import uuid
-from fork import get_all_container_by_id, get_service_name_from_container_name, delete_committed_images
 import subprocess
 from pathlib import Path
 import yaml
 from collections import deque
 import time
+from rlhf_server.fork.fork_utils import get_all_container_by_id, get_service_name_from_container_name, delete_committed_images
+from rlhf_server.networks.network_utils import does_container_need_bridge_network
+from rlhf_server.networks.bridge_networks import BridgeNetworks
 
 WAIT_TIME_OUT = 0.25
 MAX_PARALLELISM = 20
@@ -73,7 +75,9 @@ class ForkPipeline:
                  task_paths: Dict[str, TaskPaths],
                  rollout_env_id: Dict[str, str],
                  task_dir_env_id: Dict[str, str],
-                 trial_path: Dict[str, TrialPaths]):
+                 trial_path: Dict[str, TrialPaths],
+                 terminal_to_network: Dict[str, str],
+                 bridge_networks: BridgeNetworks):
         
         self.terminals = terminals
         self.state_lock = state_lock
@@ -88,6 +92,8 @@ class ForkPipeline:
         self.rollout_env_id = rollout_env_id
         self.task_dir_env_id = task_dir_env_id
         self.trial_path = trial_path
+        self.terminal_to_network = terminal_to_network
+        self.bridge_networks = bridge_networks
 
         self.commit_queue: Deque[ForkRequest] = deque()
         self.commit_q_lock: Lock = Lock()
@@ -381,13 +387,14 @@ class ForkPipeline:
         task_name = args.task_name
         image_names = args.image_names
         old_pane_log = args.old_pane_log
-        new_terminal_id = args.new_terminal_id
+        new_terminal_id = fork_request.new_terminal_id
 
         # Retry logic for starting container
         for attempt in range(MAX_RETRIES):
             try:
                 print(f'Starting {fork_request.id} after getting it from startup queue (attempt {attempt + 1}/{MAX_RETRIES})')
                 client_image_name = client_image_name.replace(rollout_id, new_rollout_id)
+
                 docker_compose_path = new_task_dir / 'docker-compose.yaml'
                 new_client_image_name = f'{client_image_name}'
                 new_client_container_name = f'{new_client_image_name}_container'
@@ -395,6 +402,17 @@ class ForkPipeline:
 
                 trial_paths = TrialPaths(Path(f'../runs/{client_image_name}'), task_name, 'trial_{}'.format(new_rollout_id))
                 trial_paths.mkdir()
+
+                network_required = does_container_need_bridge_network(docker_compose_path)
+                network_name = None
+                print(f'Starting {fork_request.id} 1.1')
+
+                if network_required:
+                    network_name = self.bridge_networks.get_network()
+                    print(f'Needed bridge network while forking: {fork_request.id}, so got it from {network_name}')
+                    print(f'Starting {fork_request.id} 1.2')
+                    with self.state_lock:
+                        self.terminal_to_network[new_terminal_id] = network_name
 
                 new_terminal = Terminal(
                     client_container_name=new_client_container_name,
@@ -408,16 +426,20 @@ class ForkPipeline:
                     cleanup=True,
                     livestream=False,
                     disable_recording=False,
+                    bridge_network_name=network_name
                 )
                 new_terminal.start()
+                print(f'Starting {fork_request.id} 1.3')
 
                 # Delete committed images after starting
                 # TODO: Move this somewhere else
                 with self.delete_q_lock:
                     self.delete_queue.extend(image_names)
 
-
+                print(f'Starting {fork_request.id} 1.4')
                 new_session = new_terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
+
+                print(f'Starting {fork_request.id} 1.5')
 
                 with self.state_lock:
                     self.task_dir_env_id[new_terminal_id] = str(new_task_dir)
@@ -436,7 +458,7 @@ class ForkPipeline:
                 break  # Success, exit retry loop
 
             except Exception as e:
-                print(f"Error starting forked container in background (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                print(f"Error starting forked container {fork_request.id} in background (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
                 if attempt < MAX_RETRIES - 1:
                     print(f"Retrying in 2 seconds...")
                     time.sleep(2)  # Delay before retry

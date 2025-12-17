@@ -23,6 +23,7 @@ class Terminal:
         cleanup: bool = False,
         livestream: bool = False,
         disable_recording: bool = False,
+        bridge_network_name: str = None
     ):
         self._client_container_name = client_container_name
         self._docker_image_name_prefix = docker_image_name_prefix
@@ -45,6 +46,7 @@ class Terminal:
             cleanup=cleanup,
             sessions_logs_path=sessions_logs_path,
             agent_logs_path=agent_logs_path,
+            bridge_network_name=bridge_network_name
         )
 
         self._init_livestreamer()
