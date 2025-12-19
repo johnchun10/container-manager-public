@@ -475,8 +475,13 @@ class ForkPipeline:
             print(f'Added for request for {terminal_id} and the q length is {len(self.commit_queue)}')
             self.commit_queue.appendleft(fork_req)
         
+        prev_logged = 0
         while not fork_req.fork_complete:
-            print(f'Waiting for {fork_req.id} fork to complete')
+            
+            if time.perf_counter() - prev_logged > 2:
+                print(f'Waiting for {fork_req.id} fork to complete')
+                prev_logged = time.perf_counter()
+                
             time.sleep(WAIT_TIME_OUT)
         
         assert fork_req.new_terminal_id != None
