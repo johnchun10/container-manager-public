@@ -59,7 +59,7 @@ path = TASKS_ROOT
 enable_caching = os.getenv("ENABLE_CACHING", "0") == "1"
 enable_hashing = False
 
-
+start_semaphore = threading.Semaphore(20)
 bridge_networks = BridgeNetworks(100)
 
 fork_pipeline = ForkPipeline(
@@ -117,50 +117,64 @@ def start_terminal():
         with state_lock:
             terminal_to_network[terminal_id] = bridge_network_name
 
-    terminal = Terminal(
-        client_container_name=client_container_name,
-        client_image_name=client_image_name,
-        docker_image_name_prefix=docker_image_name_prefix,
-        docker_compose_path=docker_compose_path,
-        sessions_logs_path=trial_paths.sessions_path,
-        agent_logs_path=trial_paths.agent_logging_dir,
-        commands_path=trial_paths.commands_path,
-        no_rebuild=False,
-        cleanup=True,
-        livestream=False,
-        disable_recording=True,
-        bridge_network_name=bridge_network_name
-    )
+    
     end_time = time.perf_counter()
     print(f"Initialized terminal in {(end_time - start_time):.2f} seconds")
 
-    try:
-        st = time.perf_counter()
-        terminal.start()
-        et = time.perf_counter()
-        print(f"Terminal started in {(et - st):.2f} seconds")
-        st = time.perf_counter()
-        session = terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
-        
-        with state_lock:
-            terminals[terminal_id] = terminal
-            sessions[terminal_id] = session
-            trial_path[terminal_id] = trial_paths
-            task_paths[terminal_id] = TaskPaths(input_path=Path(f"{path}/{task_name}"))
-            rollout_env_id[terminal_id] = rollout_id
+    retries = 0
+    e = 'failed after 5 retries'
 
-        et = time.perf_counter()
+    while retries < 5:
+        try:
+            start_semaphore.acquire()
 
-        print(f"Session created in {(et - st):.2f} seconds")
+            terminal = Terminal(
+                client_container_name=client_container_name,
+                client_image_name=client_image_name,
+                docker_image_name_prefix=docker_image_name_prefix,
+                docker_compose_path=docker_compose_path,
+                sessions_logs_path=trial_paths.sessions_path,
+                agent_logs_path=trial_paths.agent_logging_dir,
+                commands_path=trial_paths.commands_path,
+                no_rebuild=False,
+                cleanup=True,
+                livestream=False,
+                disable_recording=True,
+                bridge_network_name=bridge_network_name
+            )
+
+            st = time.perf_counter()
+            terminal.start()
+            et = time.perf_counter()
+            print(f"Terminal started in {(et - st):.2f} seconds")
+            st = time.perf_counter()
+            session = terminal.create_session(session_name="agent", is_active_stream=False, as_configured_user=True)
+            
+            with state_lock:
+                terminals[terminal_id] = terminal
+                sessions[terminal_id] = session
+                trial_path[terminal_id] = trial_paths
+                task_paths[terminal_id] = TaskPaths(input_path=Path(f"{path}/{task_name}"))
+                rollout_env_id[terminal_id] = rollout_id
+
+            et = time.perf_counter()
+
+            print(f"Session created in {(et - st):.2f} seconds")
+            
+            if enable_caching:
+                setup_tmux_res_in_container(container_name=client_container_name)
+                session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
+            return jsonify({"id": terminal_id}), 200
         
-        if enable_caching:
-            setup_tmux_res_in_container(container_name=client_container_name)
-            session.send_keys([f"source {container_resurrect_path}/scripts/startup.sh", 'Enter'], min_timeout_sec=0.1)
-        return jsonify({"id": terminal_id}), 200
-    
-    except Exception as e:
-        print(f"Error starting terminal for task {task_name}: {e}")
-        return jsonify({"error": str(e)}), 500
+        except Exception as e:
+            print(f"Error starting terminal for task {task_name}: {e}, RETRYING: {retries} times")
+            retries += 1
+            time.sleep(2)
+        
+        finally:
+            start_semaphore.release()
+
+    return jsonify({"error": str(e)}), 500
 
 
 @app.route('/done_forking', methods=['POST'])

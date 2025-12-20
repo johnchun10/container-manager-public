@@ -1,6 +1,8 @@
 import subprocess
 import os
 from pathlib import Path
+import time
+
 container_resurrect_path = "/root/tmux_resurrect"
 CONTAINER_RESURRECT_PATH = os.getenv(
     "CONTAINER_RESURRECT_PATH",
@@ -12,33 +14,41 @@ LOCAL_RESURRECT_PATH = os.getenv(
     "LOCAL_RESURRECT_PATH",
     str(BASE_DIR / "tmux-res"),  # tmux-res directory next to server.py
 )
+
+
 def setup_tmux_res_in_container(container_name: str):
     """Copy the tmux resurrect files to the specified container."""
-    try: 
-        local_resurrect_path = LOCAL_RESURRECT_PATH
-        subprocess.run(
-                ["docker", "cp", str(local_resurrect_path), f"{container_name}:{container_resurrect_path}"],
+    retries = 0
+
+    while retries < 5:
+        try: 
+            local_resurrect_path = LOCAL_RESURRECT_PATH
+            subprocess.run(
+                    ["docker", "cp", str(local_resurrect_path), f"{container_name}:{container_resurrect_path}"],
+                    check=True
+                )
+            subprocess.run(
+                [
+                    "docker", "exec", container_name,
+                    "bash", "-c",
+                    f"chmod -R 755 '{container_resurrect_path}'"
+                    # f"echo \"set -g @resurrect-dir '{container_resurrect_path}'\" >> ~/.tmux.conf && "
+                    # "echo \"set -g @resurrect-capture-pane-contents 'on'\" >> ~/.tmux.conf && "
+                    # "echo \"set -g @resurrect-save-bash-history 'on'\" >> ~/.tmux.conf && "
+                    # "echo \"set -g @resurrect-save-shell-history 'on'\" >> ~/.tmux.conf && "
+                    # f"echo \"set -g @resurrect-strategy-vim 'session'\" >> ~/.tmux.conf && "
+                    # f"echo \"set -g @resurrect-strategy 'vim'\" >> ~/.tmux.conf && "
+
+                    # f"echo \"run-shell '{container_resurrect_path}/resurrect.tmux'\" >> ~/.tmux.conf && "
+                    # "tmux source-file ~/.tmux.conf"
+                ],
                 check=True
             )
-        subprocess.run(
-            [
-                "docker", "exec", container_name,
-                "bash", "-c",
-                f"chmod -R 755 '{container_resurrect_path}'"
-                # f"echo \"set -g @resurrect-dir '{container_resurrect_path}'\" >> ~/.tmux.conf && "
-                # "echo \"set -g @resurrect-capture-pane-contents 'on'\" >> ~/.tmux.conf && "
-                # "echo \"set -g @resurrect-save-bash-history 'on'\" >> ~/.tmux.conf && "
-                # "echo \"set -g @resurrect-save-shell-history 'on'\" >> ~/.tmux.conf && "
-                # f"echo \"set -g @resurrect-strategy-vim 'session'\" >> ~/.tmux.conf && "
-                # f"echo \"set -g @resurrect-strategy 'vim'\" >> ~/.tmux.conf && "
-
-                # f"echo \"run-shell '{container_resurrect_path}/resurrect.tmux'\" >> ~/.tmux.conf && "
-                # "tmux source-file ~/.tmux.conf"
-            ],
-            check=True
-        )
-    except Exception as e:
-        print(f"Error copying tmux resurrect to container {container_name}: {e}")
+            return
+        except Exception as e:
+            print(f"Error copying tmux resurrect to container {container_name}: {e}")
+            retries += 1
+            time.sleep(1)
 
 def save_tmux_session(container_name: str):
     """Save the specified tmux session in the container using tmux-resurrect."""

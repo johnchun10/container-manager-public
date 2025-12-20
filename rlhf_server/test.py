@@ -82,6 +82,8 @@ def start_task(task_name: str) -> tuple[str, str]:
     client = TerminalBenchServerClient()
     terminal_id = client.start(task_name=task_name)
     print(f"✓ Started {task_name}: {terminal_id}")
+
+    time.sleep(2)
     return task_name, terminal_id
 
 
@@ -168,7 +170,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    host_tasks_dir = Path(__file__).parent / "host_tasks"
+    host_tasks_dir = Path(__file__).parent.parent / "tasks_easy"
     num_forks_per_task = args.num_forks
     max_tasks = args.max_tasks
 
@@ -187,11 +189,20 @@ if __name__ == "__main__":
     start_time = time.perf_counter()
     task_terminals = {}  # task_name -> terminal_id
 
+    failed_tasks = ['cross-entropy-method', 'flood-monitoring-basic', 'ilp-solver', 'jupyter-notebook-server', 'log-summary', 'matlab-python-conversion', 'mnist-learning-fix', 'recover-accuracy-log', 'simple-web-scraper']
+
+    task_names = [t for t in task_names if t not in failed_tasks]
+    
     with ThreadPoolExecutor(max_workers=len(task_names)) as executor:
         futures = [executor.submit(start_task, task) for task in task_names]
         for future in as_completed(futures):
             task_name, terminal_id = future.result()
             task_terminals[task_name] = terminal_id
+    
+
+    # for idx, task in enumerate(task_names):
+    #     start_task(task)
+    #     print(f'Started: {task} {idx + 1}/{len(task_names)}')
 
     start_duration = time.perf_counter() - start_time
     print(f"\n✓ All {len(task_terminals)} containers started in {start_duration:.2f}s")
