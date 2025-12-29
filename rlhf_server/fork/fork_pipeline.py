@@ -495,6 +495,16 @@ class ForkPipeline:
         with self.commit_q_lock:
             self.commit_queue.append(fork_req)
         
+        
+        logged_time = 0
+        while True:
+            if fork_req.commit_complete:
+                break
+            time.sleep(WAIT_TIME_OUT)
+            if time.perf_counter() - logged_time > 1:
+                print(f'Waiting for commit to complete for terminal {terminal_id}')
+                logged_time = time.perf_counter()
+        
         with self.state_lock:
             self.ongoing_forks[fork_req.new_terminal_id] = fork_req
             return fork_req.new_terminal_id
