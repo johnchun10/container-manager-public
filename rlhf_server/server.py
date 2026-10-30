@@ -24,6 +24,7 @@ from rlhf_server.fork.fork_pipeline import ForkPipeline
 from rlhf_server.delete.deletion_pipeline import DeletionPipeline
 from rlhf_server.networks.bridge_networks import BridgeNetworks
 from rlhf_server.networks.network_utils import does_container_need_bridge_network
+from rlhf_server.snapshot.snapshot_store import SnapshotNotFound, SnapshotStore, TerminalNotFound
 
 # Install and import terminal bench from this commit - 9f7cb4f4e1363db9c07e331ba81c99a02e5bafcd
 
@@ -80,6 +81,8 @@ deletion_pipeline = DeletionPipeline(
     terminals=terminals,
     state_lock=state_lock
 )
+
+snapshot_store = SnapshotStore(fork_pipeline)
 
 
 
@@ -217,6 +220,72 @@ def fork_terminal():
     new_terminal_id = fork_pipeline.fork_priority(terminal_id=terminal_id)
 
     return jsonify({"id": new_terminal_id}), 200
+
+"""
+Save a terminal as a cold snapshot: commit its containers to images and keep
+them, without starting anything. The terminal keeps running.
+Arguments:
+- id: terminal id (str)
+Returns:
+- snapshot_id: id to pass to /restore and /delete_snapshot (str)
+"""
+@app.route('/snapshot', methods=['POST'])
+def snapshot_terminal():
+    data = request.json
+    if "id" not in data:
+        return jsonify({"error": "No terminal id provided"}), 400
+    try:
+        return jsonify({"snapshot_id": snapshot_store.snapshot(data['id'])}), 200
+    except TerminalNotFound:
+        return jsonify({"error": "Terminal not found"}), 404
+    except Exception as e:
+        print(f"Error snapshotting terminal {data['id']}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+"""
+Start a new terminal from a snapshot. A snapshot can be restored any number
+of times; each restore is independent of the others and of the snapshot.
+Arguments:
+- snapshot_id: id from /snapshot (str)
+Returns:
+- id: the new terminal's id (str)
+"""
+@app.route('/restore', methods=['POST'])
+def restore_snapshot():
+    data = request.json
+    if "snapshot_id" not in data:
+        return jsonify({"error": "No snapshot id provided"}), 400
+    try:
+        return jsonify({"id": snapshot_store.restore(data['snapshot_id'])}), 200
+    except SnapshotNotFound:
+        return jsonify({"error": "Snapshot not found"}), 404
+    except Exception as e:
+        print(f"Error restoring snapshot {data['snapshot_id']}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+"""
+Delete a snapshot's images and files. Terminals restored from it keep running.
+Arguments:
+- snapshot_id: id from /snapshot (str)
+Returns:
+- status: 'deleted' (str)
+"""
+@app.route('/delete_snapshot', methods=['POST'])
+def delete_snapshot():
+    data = request.json
+    if "snapshot_id" not in data:
+        return jsonify({"error": "No snapshot id provided"}), 400
+    try:
+        snapshot_store.delete(data['snapshot_id'])
+        return jsonify({"status": "deleted"}), 200
+    except SnapshotNotFound:
+        return jsonify({"error": "Snapshot not found"}), 404
+    except Exception as e:
+        print(f"Error deleting snapshot {data['snapshot_id']}: {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 """
 Stop a terminal session.

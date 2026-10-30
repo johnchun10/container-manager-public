@@ -40,3 +40,22 @@ Execute the server in the same environment as terminal-bench
 cd /path/to/server
 uv run server.py
 ```
+
+## Cold snapshots
+
+`/fork` returns a running copy and deletes the images it committed. These
+endpoints keep the images instead, so a saved state can be restored many times
+without keeping a container running for it:
+
+| Endpoint | Request | Response |
+|---|---|---|
+| `POST /snapshot` | `{"id": terminal_id}` | `{"snapshot_id": ...}`; 404 for an unknown terminal |
+| `POST /restore` | `{"snapshot_id": ...}` | `{"id": new_terminal_id}`; 404 for an unknown snapshot |
+| `POST /delete_snapshot` | `{"snapshot_id": ...}` | `{"status": "deleted"}`; 404 for an unknown snapshot |
+
+A snapshot holds what `docker commit` captures (each container's filesystem,
+not volumes or processes) plus, with `ENABLE_CACHING=1`, the cwd and exported
+variables saved by tmux-resurrect. The terminal keeps running. Each restore is
+independent of the others and of the snapshot. Snapshot records are kept in
+memory, so a server restart forgets them but leaves their images.
+Implementation: `snapshot/snapshot_store.py`; tests: `tests/unit/snapshots`.
