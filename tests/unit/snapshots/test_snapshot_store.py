@@ -81,9 +81,64 @@ def test_delete_removes_images_and_task_dir(monkeypatch, tmp_path):
 
     store.delete(snapshot.snapshot_id)
 
-    assert calls == [("rmi", name) for name in snapshot.image_names]
+    assert [c for c in calls if c[0] == "rmi"] == [("rmi", name) for name in snapshot.image_names]
     assert snapshot.snapshot_id not in store.snapshots
     assert not snapshot.task_dir.exists()
+
+
+def fake_images(monkeypatch, images: dict[str, list[str]]):
+    """A tiny image store: image id -> tags. Untagging a chained snapshot's last
+    name leaves its image behind untagged, as Docker's containerd store does."""
+    calls = []
+
+    def fake(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        ok = lambda out="": subprocess.CompletedProcess(args, 0, out, "")
+        if args[:2] == ("image", "inspect"):
+            ref, fmt = args[-1], args[3]
+            image_id = ref if ref in images else next((i for i, t in images.items() if ref in t), None)
+            if image_id is None:
+                return subprocess.CompletedProcess(args, 1, "", f"Error: No such image: {ref}")
+            return ok(image_id if fmt == "{{.Id}}" else str(len(images[image_id])))
+        if args[0] == "rmi":
+            ref = args[1]
+            if ref in images:
+                del images[ref]
+                return ok()
+            for tags in images.values():
+                if ref in tags:
+                    tags.remove(ref)  # untag only: the image stays
+                    return ok()
+            return subprocess.CompletedProcess(args, 1, "", f"Error: No such image: {ref}")
+        return ok()
+
+    monkeypatch.setattr(snapshot_store, "_docker", fake)
+    return calls
+
+
+def test_delete_removes_a_chained_snapshot_left_untagged(monkeypatch, tmp_path):
+    store = SnapshotStore(FakePipeline())
+    snapshot = make_snapshot(tmp_path)
+    store.snapshots[snapshot.snapshot_id] = snapshot
+    images = {f"sha256:{i}": [name] for i, name in enumerate(snapshot.image_names)}
+    fake_images(monkeypatch, images)
+
+    store.delete(snapshot.snapshot_id)
+
+    assert images == {}
+
+
+def test_delete_keeps_an_image_a_restore_still_tags(monkeypatch, tmp_path):
+    store = SnapshotStore(FakePipeline())
+    snapshot = make_snapshot(tmp_path)
+    store.snapshots[snapshot.snapshot_id] = snapshot
+    images = {f"sha256:{i}": [name] for i, name in enumerate(snapshot.image_names)}
+    images["sha256:0"].append("task_restore_test_container")
+    fake_images(monkeypatch, images)
+
+    store.delete(snapshot.snapshot_id)
+
+    assert images == {"sha256:0": ["task_restore_test_container"]}
 
 
 def test_delete_treats_already_removed_images_as_removed(monkeypatch, tmp_path):
@@ -118,7 +173,7 @@ def test_snapshot_commit_relabels_the_compose_project(monkeypatch):
     calls = stub_docker(monkeypatch, {})
     snapshot_store._commit("task_rid_test_container", "task_abc_test_container")
     assert calls == [(
-        "commit", "--no-pause",
+        "commit", "--pause=false",
         "--change", "LABEL com.docker.compose.project=tvcache-snapshot",
         "task_rid_test_container", "task_abc_test_container",
     )]

@@ -4,6 +4,7 @@ from collections import deque
 from typing import Deque
 from threading import Lock
 import time
+from terminal_bench.terminal.container_cli import container_cli
 
 RETRY_TIMEOUT = 1
 
@@ -32,7 +33,7 @@ class BridgeNetworks:
         return result.returncode == 0, result.stdout, result.stderr
 
     def _create_network(self, network_name: str):
-         success, _, _ = self.run_command(["docker", "network", "create", network_name])
+         success, _, _ = self.run_command([*container_cli(), "network", "create", network_name])
          return success  
     
     def get_network_name(self) -> str:
@@ -54,7 +55,7 @@ class BridgeNetworks:
 
         with self.networks_lock:
             for idx, network in enumerate(self.networks):
-                return_code, stdout, stderr = self.run_command(["docker", "network", "rm", network])
+                return_code, stdout, stderr = self.run_command([*container_cli(), "network", "rm", network])
 
                 print(f'Result of deleting network: {network} is: {return_code}, stdout: {stdout} and error: {stderr}')
             

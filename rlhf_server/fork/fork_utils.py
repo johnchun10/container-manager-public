@@ -1,7 +1,9 @@
 import subprocess
+import shlex
+from terminal_bench.terminal.container_cli import container_cli
 def get_all_container_by_id(rollout_id: str):
     result = subprocess.run(
-        f"docker ps --filter name={rollout_id} --format '{{{{.Names}}}}'",
+        f"{shlex.join(container_cli())} ps --filter name={rollout_id} --format '{{{{.Names}}}}'",
         shell=True, capture_output=True, text=True
     )
     container_ids = result.stdout.strip().split('\n') if result.returncode == 0 and result.stdout.strip() else []
@@ -13,7 +15,7 @@ def commit_container(container_names: list[str], old_rollout_id: str, new_rollou
     for container_name in container_names:
         new_container_name = container_name.replace(old_rollout_id, new_rollout_id)
         commit_result = subprocess.run(
-            ['docker', 'commit', container_name, f'{new_container_name}'],
+            [*container_cli(), 'commit', container_name, f'{new_container_name}'],
             capture_output=True, text=True
         )
 
@@ -28,7 +30,7 @@ def delete_committed_images(image_names: list[str]):
     commit_results = []
     for image_name in image_names:
         commit_result = subprocess.run(
-            ['docker', 'rmi', '-f', image_name],
+            [*container_cli(), 'rmi', '-f', image_name],
             capture_output=True, text=True
         )
         if commit_result.returncode != 0:

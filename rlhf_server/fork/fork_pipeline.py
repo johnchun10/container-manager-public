@@ -18,6 +18,7 @@ import time
 from rlhf_server.fork.fork_utils import get_all_container_by_id, get_service_name_from_container_name, delete_committed_images
 from rlhf_server.networks.network_utils import does_container_need_bridge_network
 from rlhf_server.networks.bridge_networks import BridgeNetworks
+from terminal_bench.terminal.container_cli import container_cli
 
 WAIT_TIME_OUT = 0.25
 MAX_PARALLELISM = 20
@@ -258,7 +259,7 @@ class ForkPipeline:
             commit_result = None
             for attempt in range(MAX_RETRIES):
                 commit_result = subprocess.run(
-                    ['docker', 'commit',  '--no-pause', container_name, f'{new_container_name}'],
+                    [*container_cli(), 'commit', '--pause=false', container_name, f'{new_container_name}'],
                     capture_output=True, text=True
                 )
 

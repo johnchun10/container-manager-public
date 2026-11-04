@@ -36,6 +36,7 @@ from rlhf_server.fork.fork_utils import get_all_container_by_id
 from rlhf_server.networks.network_utils import does_container_need_bridge_network
 from terminal_bench.handlers.trial_handler import TaskPaths, TrialPaths
 from terminal_bench.terminal import Terminal
+from terminal_bench.terminal.container_cli import container_cli
 
 MAX_PARALLELISM = 20
 MAX_COMMIT_ATTEMPTS = 3
@@ -77,7 +78,7 @@ def retag_compose(compose: dict, old_token: str, new_token: str) -> dict:
 
 
 def _docker(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], capture_output=True, text=True)
+    return subprocess.run([*container_cli(), *args], capture_output=True, text=True)
 
 
 def _commit(container_name: str, image_name: str) -> subprocess.CompletedProcess:
@@ -91,7 +92,7 @@ def _commit(container_name: str, image_name: str) -> subprocess.CompletedProcess
     result = None
     for _ in range(MAX_COMMIT_ATTEMPTS):
         result = _docker(
-            "commit", "--no-pause",
+            "commit", "--pause=false",
             "--change", f"LABEL com.docker.compose.project={SNAPSHOT_PROJECT_LABEL}",
             container_name, image_name,
         )
@@ -110,6 +111,29 @@ def _remove_images(image_names: list[str]) -> list[str]:
         if result.returncode != 0 and "No such image" not in result.stderr:
             errors.append(result.stderr.strip())
     return errors
+
+
+def _image_ids(image_names: list[str]) -> list[str]:
+    """The image ids behind these names (names that no longer exist are skipped)."""
+    ids = []
+    for image in image_names:
+        result = _docker("image", "inspect", "--format", "{{.Id}}", image)
+        if result.returncode == 0 and result.stdout.strip():
+            ids.append(result.stdout.strip())
+    return ids
+
+
+def _remove_untagged(image_ids: list[str]) -> None:
+    """Removes each image that is left with no tag at all.
+
+    Untagging a snapshot's last name normally deletes its image, but under
+    Docker's containerd image store a snapshot committed from a restored
+    snapshot (a chain) can survive as an untagged `<none>` image, which
+    leaks its disk. Images some restore still holds a tag on are kept."""
+    for image_id in image_ids:
+        tags = _docker("image", "inspect", "--format", "{{len .RepoTags}}", image_id)
+        if tags.returncode == 0 and tags.stdout.strip() == "0":
+            _docker("rmi", image_id)
 
 
 class SnapshotStore:
@@ -283,9 +307,11 @@ class SnapshotStore:
                 raise SnapshotNotFound(snapshot_id)
             # Not forced: running restores hold their own tags, so removing
             # the snapshot's tag never touches their images.
+            image_ids = _image_ids(snapshot.image_names)
             errors = _remove_images(snapshot.image_names)
             if errors:
                 # Keep the record so the caller can retry.
                 raise RuntimeError(f"docker rmi failed: {'; '.join(errors)}")
+            _remove_untagged(image_ids)
             del self.snapshots[snapshot_id]
         shutil.rmtree(snapshot.task_dir, ignore_errors=True)

@@ -125,7 +125,7 @@ def start_terminal():
     print(f"Initialized terminal in {(end_time - start_time):.2f} seconds")
 
     retries = 0
-    e = 'failed after 5 retries'
+    last_error = 'failed after 5 retries'
 
     while retries < 5:
         try:
@@ -171,13 +171,14 @@ def start_terminal():
         
         except Exception as e:
             print(f"Error starting terminal for task {task_name}: {e}, RETRYING: {retries} times")
+            last_error = e  # `e` is unbound once the except block ends
             retries += 1
             time.sleep(2)
         
         finally:
             start_semaphore.release()
 
-    return jsonify({"error": str(e)}), 500
+    return jsonify({"error": str(last_error)}), 500
 
 
 @app.route('/done_forking', methods=['POST'])
