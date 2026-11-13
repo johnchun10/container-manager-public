@@ -14,6 +14,7 @@ from terminal_bench.utils.logger import logger
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+from terminal_bench.terminal.container_cli import compose_cmd, is_docker
 
 class DockerComposeEnvVars(EnvModel):
     task_docker_client_container_name: str | None = None
@@ -88,8 +89,7 @@ class DockerComposeManager:
 
     def get_docker_compose_command(self, command: list[str]) -> list[str]:
         return [
-            "docker",
-            "compose",
+            *compose_cmd(),
             "-p",
             self._client_container_name,
             "-f",
@@ -163,6 +163,8 @@ class DockerComposeManager:
         self._run_docker_compose_command(["build"])
 
     def _cleanup_build_cache(self) -> None:
+        if not is_docker():
+            return  # buildx is Docker's; other CLIs manage their own build cache
         try:
             # Use --max-used-space to keep cache under the specified size limit
             subprocess.run(
@@ -186,15 +188,23 @@ class DockerComposeManager:
     def _create_tar_archive(
         paths: list[Path], container_filename: str | None
     ) -> io.BytesIO:
+        def as_root(info: tarfile.TarInfo) -> tarfile.TarInfo:
+            # Rootless podman cannot chown to the host user's uid inside the
+            # container (it is not mapped there), so put_archive fails with
+            # "lchown ... invalid argument". Root-owned entries work under both.
+            info.uid = info.gid = 0
+            info.uname = info.gname = "root"
+            return info
+
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode="w") as tar:
             for path in paths:
                 if path.is_file():
                     arcname = container_filename if container_filename else path.name
-                    tar.add(path, arcname=arcname)
+                    tar.add(path, arcname=arcname, filter=as_root)
                 elif path.is_dir():
                     for item in path.rglob("*"):
-                        tar.add(item, arcname=item.relative_to(path))
+                        tar.add(item, arcname=item.relative_to(path), filter=as_root)
                 else:
                     raise ValueError(f"Path {path} is neither a file nor directory")
 
