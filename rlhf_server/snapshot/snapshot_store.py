@@ -22,6 +22,7 @@ records but leaves the images.
 """
 
 import shutil
+import re
 import subprocess
 import time
 import uuid
@@ -75,11 +76,24 @@ def _layer_bytes(image_names: list[str]) -> int:
     0 for an image whose history can't be read."""
     total = 0
     for image in image_names:
+        # docker honors --human=false (bytes); podman prints e.g. "22kB" anyway.
         result = _docker("history", "--human=false", "--format", "{{.Size}}", image)
-        lines = result.stdout.split()
-        if result.returncode == 0 and lines and lines[0].isdigit():
-            total += int(lines[0])
+        lines = result.stdout.splitlines()
+        if result.returncode == 0 and lines:
+            total += _parse_size(lines[0])
     return total
+
+
+_SIZE_UNITS = {"": 1, "b": 1, "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12,
+               "kib": 2**10, "mib": 2**20, "gib": 2**30}
+
+
+def _parse_size(text: str) -> int:
+    """'22kB', '1.5 MB', '4096' -> bytes (0 if unreadable)."""
+    match = re.match(r"\s*([\d.]+)\s*([A-Za-z]*)", text)
+    if not match:
+        return 0
+    return int(float(match.group(1)) * _SIZE_UNITS.get(match.group(2).lower(), 0))
 
 
 def retag_compose(compose: dict, old_token: str, new_token: str) -> dict:
