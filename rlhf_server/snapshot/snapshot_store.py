@@ -65,6 +65,21 @@ class Snapshot:
     parent_rollout_id: str
     task_name: str
     pane_log: str
+    # Bytes the snapshot adds: the top (committed) layer of each image. The
+    # base layers are shared with the task image and other snapshots.
+    layer_bytes: int = 0
+
+
+def _layer_bytes(image_names: list[str]) -> int:
+    """Sums the size of each image's newest layer (what the commit added);
+    0 for an image whose history can't be read."""
+    total = 0
+    for image in image_names:
+        result = _docker("history", "--human=false", "--format", "{{.Size}}", image)
+        lines = result.stdout.split()
+        if result.returncode == 0 and lines and lines[0].isdigit():
+            total += int(lines[0])
+    return total
 
 
 def retag_compose(compose: dict, old_token: str, new_token: str) -> dict:
@@ -193,11 +208,18 @@ class SnapshotStore:
             parent_rollout_id=rollout_id,
             task_name=task_name,
             pane_log=pane_log,
+            layer_bytes=_layer_bytes(image_names),
         )
         with self.snapshots_lock:
             self.snapshots[snapshot.snapshot_id] = snapshot
-        print(f"Snapshot {snapshot.snapshot_id} of {terminal_id} took {time.perf_counter() - st:.2f}s")
+        print(f"Snapshot {snapshot.snapshot_id} of {terminal_id} took {time.perf_counter() - st:.2f}s, "
+              f"{snapshot.layer_bytes} bytes")
         return snapshot.snapshot_id
+
+    def layer_bytes(self, snapshot_id: str) -> int:
+        with self.snapshots_lock:
+            snapshot = self.snapshots.get(snapshot_id)
+        return snapshot.layer_bytes if snapshot else 0
 
     def restore(self, snapshot_id: str) -> str:
         pipeline = self.fork_pipeline

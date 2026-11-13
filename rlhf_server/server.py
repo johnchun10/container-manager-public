@@ -236,7 +236,9 @@ def snapshot_terminal():
     if "id" not in data:
         return jsonify({"error": "No terminal id provided"}), 400
     try:
-        return jsonify({"snapshot_id": snapshot_store.snapshot(data['id'])}), 200
+        snapshot_id = snapshot_store.snapshot(data['id'])
+        return jsonify({"snapshot_id": snapshot_id,
+                        "layer_bytes": snapshot_store.layer_bytes(snapshot_id)}), 200
     except TerminalNotFound:
         return jsonify({"error": "Terminal not found"}), 404
     except Exception as e:
