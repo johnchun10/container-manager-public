@@ -19,14 +19,26 @@ filesystem, not volumes or processes) plus, with ENABLE_CACHING=1, the cwd and
 exported variables that tmux-resurrect's exit.sh writes into the filesystem.
 Snapshot records live in memory, like terminals; a manager restart loses the
 records but leaves the images.
+
+To use snapshots after the manager, or the node holding its image store, is
+gone:
+
+    save(directory)   write the records (snapshots.json), every snapshot's
+                      images (images.tar) and task dir (task_dirs/) to the
+                      directory
+    load(directory)   in another manager: load the images and take the records
+
+A saved snapshot can be deleted here and loaded again later: load puts back a
+task dir that is gone, at the path it had.
 """
 
+import json
 import shutil
 import re
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock, Semaphore
 
@@ -37,12 +49,15 @@ from rlhf_server.fork.fork_utils import get_all_container_by_id
 from rlhf_server.networks.network_utils import does_container_need_bridge_network
 from terminal_bench.handlers.trial_handler import TaskPaths, TrialPaths
 from terminal_bench.terminal import Terminal
-from terminal_bench.terminal.container_cli import container_cli
+from terminal_bench.terminal.container_cli import container_cli, is_docker
 
 MAX_PARALLELISM = 20
 MAX_COMMIT_ATTEMPTS = 3
 EXIT_SCRIPT_TIMEOUT_SEC = 30
 SNAPSHOT_PROJECT_LABEL = "tvcache-snapshot"
+RECORDS_FILE = "snapshots.json"
+IMAGES_FILE = "images.tar"
+TASK_DIRS = "task_dirs"
 
 
 class SnapshotNotFound(Exception):
@@ -351,3 +366,83 @@ class SnapshotStore:
             _remove_untagged(image_ids)
             del self.snapshots[snapshot_id]
         shutil.rmtree(snapshot.task_dir, ignore_errors=True)
+
+    def save(self, directory: Path, snapshot_ids: list[str] | None = None) -> dict:
+        """Writes the snapshots (all of them, or the listed ones) to
+        `directory`: their records, one archive of all their images and a copy
+        of each task dir. The snapshots stay usable here. Holds the snapshot
+        lock throughout, so nothing is restored or deleted halfway through.
+
+        Returns {"snapshots", "images", "bytes" (the archive's), "unknown"
+        (listed ids this manager does not have)}."""
+        directory = Path(directory)
+        with self.snapshots_lock:
+            if snapshot_ids is None:
+                chosen, unknown = list(self.snapshots.values()), []
+            else:
+                chosen = [self.snapshots[i] for i in dict.fromkeys(snapshot_ids) if i in self.snapshots]
+                unknown = [i for i in dict.fromkeys(snapshot_ids) if i not in self.snapshots]
+            st = time.perf_counter()
+            directory.mkdir(parents=True, exist_ok=True)
+            images = sorted({name for snapshot in chosen for name in snapshot.image_names})
+            archive = directory / IMAGES_FILE
+            archive.unlink(missing_ok=True)
+            if images:
+                partial = directory / f"{IMAGES_FILE}.partial"
+                # One archive for all images, so the layers they share (the
+                # task image under each snapshot) are written once. podman
+                # takes several images only with --multi-image-archive.
+                many = [] if is_docker() else ["--multi-image-archive"]
+                result = _docker("save", *many, "-o", str(partial), *images)
+                if result.returncode != 0:
+                    partial.unlink(missing_ok=True)
+                    raise RuntimeError(f"saving {len(images)} images failed: {result.stderr.strip()}")
+                partial.replace(archive)
+            shutil.rmtree(directory / TASK_DIRS, ignore_errors=True)
+            for snapshot in chosen:
+                shutil.copytree(snapshot.task_dir, directory / TASK_DIRS / snapshot.snapshot_id)
+            records = [{**asdict(snapshot), "task_dir": str(Path(snapshot.task_dir).resolve())} for snapshot in chosen]
+            partial = directory / f"{RECORDS_FILE}.partial"
+            partial.write_text(json.dumps({"snapshots": records}))
+            partial.replace(directory / RECORDS_FILE)  # written last: its presence means the save is whole
+        size = archive.stat().st_size if archive.exists() else 0
+        print(f"Saved {len(chosen)} snapshots ({len(images)} images, {size} bytes) to {directory} "
+              f"in {time.perf_counter() - st:.2f}s")
+        return {"snapshots": len(chosen), "images": len(images), "bytes": size, "unknown": unknown}
+
+    def load(self, directory: Path) -> dict:
+        """Loads what save() wrote: the images into this node's image store
+        and the records into this manager. A task dir that no longer exists is
+        copied back to the path it had. A snapshot whose images or task dir
+        are not there afterwards is left out.
+
+        Returns {"snapshots" (now restorable), "missing" (ids left out)}."""
+        directory = Path(directory)
+        records_path = directory / RECORDS_FILE
+        if not records_path.exists():
+            raise FileNotFoundError(f"no {RECORDS_FILE} in {directory}")
+        st = time.perf_counter()
+        records = json.loads(records_path.read_text())["snapshots"]
+        archive = directory / IMAGES_FILE
+        if archive.exists():
+            result = _docker("load", "-i", str(archive))
+            if result.returncode != 0:
+                raise RuntimeError(f"loading {archive} failed: {result.stderr.strip()}")
+        loaded, missing = [], []
+        for record in records:
+            snapshot = Snapshot(**{**record, "task_dir": Path(record["task_dir"])})
+            saved_task_dir = directory / TASK_DIRS / snapshot.snapshot_id
+            if not snapshot.task_dir.is_dir() and saved_task_dir.is_dir():
+                try:
+                    shutil.copytree(saved_task_dir, snapshot.task_dir)
+                except OSError as error:
+                    print(f"Could not put back {snapshot.task_dir}: {error}")
+            if not snapshot.task_dir.is_dir() or len(_image_ids(snapshot.image_names)) != len(snapshot.image_names):
+                missing.append(snapshot.snapshot_id)
+                continue
+            with self.snapshots_lock:
+                self.snapshots[snapshot.snapshot_id] = snapshot
+            loaded.append(snapshot.snapshot_id)
+        print(f"Loaded {len(loaded)} snapshots from {directory} in {time.perf_counter() - st:.2f}s"
+              + (f"; left out {len(missing)} with no images or task dir" if missing else ""))
+        return {"snapshots": len(loaded), "missing": missing}

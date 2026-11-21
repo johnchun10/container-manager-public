@@ -52,10 +52,20 @@ without keeping a container running for it:
 | `POST /snapshot` | `{"id": terminal_id}` | `{"snapshot_id": ...}`; 404 for an unknown terminal |
 | `POST /restore` | `{"snapshot_id": ...}` | `{"id": new_terminal_id}`; 404 for an unknown snapshot |
 | `POST /delete_snapshot` | `{"snapshot_id": ...}` | `{"status": "deleted"}`; 404 for an unknown snapshot |
+| `POST /save_snapshots` | `{"dir": path, "snapshot_ids": [...]}` (ids optional: all) | `{"snapshots": n, "images": n, "bytes": n, "unknown": [...]}` |
+| `POST /load_snapshots` | `{"dir": path}` | `{"snapshots": n, "missing": [...]}`; 404 if nothing was saved there |
 
 A snapshot holds what `docker commit` captures (each container's filesystem,
 not volumes or processes) plus, with `ENABLE_CACHING=1`, the cwd and exported
 variables saved by tmux-resurrect. The terminal keeps running. Each restore is
 independent of the others and of the snapshot. Snapshot records are kept in
 memory, so a server restart forgets them but leaves their images.
+
+`/save_snapshots` writes the records (`snapshots.json`), one archive of the
+snapshots' images (`images.tar`) and their task directory copies
+(`task_dirs/`) to a directory, and `/load_snapshots` reads them into another
+manager, for example on another node after the first one's image store is
+gone. A saved snapshot can be deleted and loaded again later. Both calls take
+as long as the container CLI's `save` and `load` do: minutes for many
+gigabytes.
 Implementation: `snapshot/snapshot_store.py`; tests: `tests/unit/snapshots`.

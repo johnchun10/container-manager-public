@@ -291,6 +291,52 @@ def delete_snapshot():
 
 
 """
+Write snapshots to a directory, to use them after this manager (or the node
+holding its images) is gone: snapshots.json and images.tar.
+Arguments:
+- dir: directory to write to (str)
+- snapshot_ids: the snapshots to save (list of str); all of them if omitted
+Returns:
+- snapshots, images: how many were saved (int)
+- bytes: size of images.tar (int)
+- unknown: listed ids this manager does not have (list of str)
+"""
+@app.route('/save_snapshots', methods=['POST'])
+def save_snapshots():
+    data = request.json
+    if "dir" not in data:
+        return jsonify({"error": "No directory provided"}), 400
+    try:
+        return jsonify(snapshot_store.save(Path(data['dir']), data.get('snapshot_ids'))), 200
+    except Exception as e:
+        print(f"Error saving snapshots to {data['dir']}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+"""
+Load the snapshots /save_snapshots wrote, so /restore works for them here.
+Their task dir copies must be where they were when they were saved.
+Arguments:
+- dir: directory /save_snapshots wrote to (str)
+Returns:
+- snapshots: how many can now be restored (int)
+- missing: ids left out because their images or task dir are gone (list of str)
+"""
+@app.route('/load_snapshots', methods=['POST'])
+def load_snapshots():
+    data = request.json
+    if "dir" not in data:
+        return jsonify({"error": "No directory provided"}), 400
+    try:
+        return jsonify(snapshot_store.load(Path(data['dir']))), 200
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"Error loading snapshots from {data['dir']}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+"""
 Stop a terminal session.
 Arguments:
 - id: unique id for the terminal session (str)

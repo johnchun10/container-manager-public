@@ -1,5 +1,6 @@
 """Unit tests for cold snapshots that need no Docker (docker calls are stubbed)."""
 
+import shutil
 import subprocess
 from pathlib import Path
 from threading import Lock
@@ -26,6 +27,7 @@ class FakePipeline:
 def make_snapshot(tmp_path: Path) -> Snapshot:
     task_dir = tmp_path / "task"
     task_dir.mkdir()
+    (task_dir / "docker-compose.yaml").write_text("services: {}")
     return Snapshot(
         snapshot_id="snap_abc",
         token="abc",
@@ -177,3 +179,96 @@ def test_snapshot_commit_relabels_the_compose_project(monkeypatch):
         "--change", "LABEL com.docker.compose.project=tvcache-snapshot",
         "task_rid_test_container", "task_abc_test_container",
     )]
+
+
+def stub_saving_docker(monkeypatch):
+    """Every call succeeds, `save` writes its archive and every image exists."""
+    calls = []
+
+    def fake(*args: str) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if args[0] == "save":
+            Path(args[args.index("-o") + 1]).write_bytes(b"layers")
+        out = "sha256:1" if args[:2] == ("image", "inspect") else ""
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(snapshot_store, "_docker", fake)
+    return calls
+
+
+def test_save_then_load_moves_snapshots_to_another_manager(monkeypatch, tmp_path):
+    store = SnapshotStore(FakePipeline())
+    snapshot = make_snapshot(tmp_path)
+    store.snapshots[snapshot.snapshot_id] = snapshot
+    calls = stub_saving_docker(monkeypatch)
+    monkeypatch.setenv("CONTAINER_CLI", "podman-hpc")
+    out = tmp_path / "saved"
+
+    saved = store.save(out, ["snap_abc", "snap_gone"])
+
+    assert saved == {"snapshots": 1, "images": 2, "bytes": 6, "unknown": ["snap_gone"]}
+    # One archive for every image; podman needs the flag to take more than one.
+    assert calls == [("save", "--multi-image-archive", "-o", str(out / "images.tar.partial"), *sorted(snapshot.image_names))]
+    assert sorted(p.name for p in out.iterdir()) == ["images.tar", "snapshots.json", "task_dirs"]
+    assert (out / "task_dirs" / "snap_abc" / "docker-compose.yaml").read_text() == "services: {}"
+    assert snapshot.snapshot_id in store.snapshots  # still usable here
+
+    # The first manager deletes the snapshot (as a run does when it ends); the
+    # saved copy still loads, task dir included.
+    store.delete(snapshot.snapshot_id)
+    assert not snapshot.task_dir.exists()
+    calls.clear()
+    other = SnapshotStore(FakePipeline())
+    assert other.load(out) == {"snapshots": 1, "missing": []}
+    assert calls[0] == ("load", "-i", str(out / "images.tar"))
+    assert other.snapshots == {snapshot.snapshot_id: snapshot}  # the same record
+    assert (snapshot.task_dir / "docker-compose.yaml").read_text() == "services: {}"
+
+
+def test_save_with_docker_and_no_ids_saves_everything(monkeypatch, tmp_path):
+    store = SnapshotStore(FakePipeline())
+    snapshot = make_snapshot(tmp_path)
+    store.snapshots[snapshot.snapshot_id] = snapshot
+    calls = stub_saving_docker(monkeypatch)
+    monkeypatch.delenv("CONTAINER_CLI", raising=False)
+
+    saved = store.save(tmp_path / "saved")
+
+    assert (saved["snapshots"], saved["unknown"]) == (1, [])
+    assert calls[0][:2] == ("save", "-o")  # docker saves several images without a flag
+
+
+def test_failed_save_leaves_no_records_file(monkeypatch, tmp_path):
+    store = SnapshotStore(FakePipeline())
+    snapshot = make_snapshot(tmp_path)
+    store.snapshots[snapshot.snapshot_id] = snapshot
+    full = subprocess.CompletedProcess((), 1, "", "Error: no space left on device")
+    stub_docker(monkeypatch, {snapshot.image_names[-1]: full})
+
+    with pytest.raises(RuntimeError, match="no space left"):
+        store.save(tmp_path / "saved")
+
+    assert not (tmp_path / "saved" / "snapshots.json").exists()  # a loader sees no half-written save
+
+
+def test_load_leaves_out_snapshots_whose_images_or_task_dir_are_gone(monkeypatch, tmp_path):
+    store = SnapshotStore(FakePipeline())
+    kept = make_snapshot(tmp_path)
+    no_dir = Snapshot(**{**kept.__dict__, "snapshot_id": "snap_nodir", "task_dir": tmp_path / "other"})
+    no_image = Snapshot(**{**kept.__dict__, "snapshot_id": "snap_noimage", "image_names": ["gone_image"]})
+    no_dir.task_dir.mkdir()
+    for snapshot in (kept, no_dir, no_image):
+        store.snapshots[snapshot.snapshot_id] = snapshot
+    stub_saving_docker(monkeypatch)
+    store.save(tmp_path / "saved")
+    # Neither the task dir nor its saved copy is there any more.
+    shutil.rmtree(no_dir.task_dir)
+    shutil.rmtree(tmp_path / "saved" / "task_dirs" / "snap_nodir")
+
+    fake_images(monkeypatch, {"sha256:1": list(kept.image_names)})
+    other = SnapshotStore(FakePipeline())
+    assert other.load(tmp_path / "saved") == {"snapshots": 1, "missing": ["snap_nodir", "snap_noimage"]}
+    assert list(other.snapshots) == ["snap_abc"]
+
+    with pytest.raises(FileNotFoundError):
+        other.load(tmp_path / "nothing-saved-here")
