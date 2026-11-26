@@ -24,23 +24,27 @@ To use snapshots after the manager, or the node holding its image store, is
 gone:
 
     save(directory)   write the records (snapshots.json), every snapshot's
-                      images (images.tar) and task dir (task_dirs/) to the
-                      directory
+                      images (images-NNN.tar, at most IMAGES_PER_ARCHIVE in
+                      each) and task dir (task_dirs/) to the directory
     load(directory)   in another manager: load the images and take the records
 
 A saved snapshot can be deleted here and loaded again later: load puts back a
 task dir that is gone, at the path it had.
 """
 
+import io
 import json
+import posixpath
 import shutil
 import re
 import subprocess
+import tarfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock, Semaphore
+from typing import Iterator
 
 import yaml
 
@@ -56,7 +60,14 @@ MAX_COMMIT_ATTEMPTS = 3
 EXIT_SCRIPT_TIMEOUT_SEC = 30
 SNAPSHOT_PROJECT_LABEL = "tvcache-snapshot"
 RECORDS_FILE = "snapshots.json"
-IMAGES_FILE = "images.tar"
+# Images are saved IMAGES_PER_ARCHIVE to an archive (images-000.tar, ...):
+# podman cannot load an archive whose list of images (manifest.json) is over
+# 1 MiB, which one archive of a run's 2,704 snapshots was. An archive that is
+# over it anyway (images.tar, from before this) is split when it is loaded,
+# into parts whose lists are at most MANIFEST_BYTES.
+IMAGES_PER_ARCHIVE = 100
+MANIFEST_BYTES = 512 * 1024
+MANIFEST_TOO_LARGE = "exceeded maximum allowed size"
 TASK_DIRS = "task_dirs"
 
 
@@ -84,6 +95,90 @@ class Snapshot:
     # Bytes the snapshot adds: the top (committed) layer of each image. The
     # base layers are shared with the task image and other snapshots.
     layer_bytes: int = 0
+
+
+def _archives(directory: Path) -> list[Path]:
+    """The image archives in a saved directory: images-NNN.tar, or the one
+    images.tar of an older save."""
+    return sorted(directory.glob("images*.tar"))
+
+
+def _image_groups(snapshots: list["Snapshot"], per_archive: int) -> list[list[str]]:
+    """The snapshots' images, each once, in groups of at most `per_archive`
+    (more only when one snapshot alone has more). Snapshots of one task are
+    next to each other, so the task image they share is in few archives."""
+    groups: list[list[str]] = [[]]
+    seen: set[str] = set()
+    for snapshot in sorted(snapshots, key=lambda s: (s.task_name, s.snapshot_id)):
+        new = [name for name in dict.fromkeys(snapshot.image_names) if name not in seen]
+        seen.update(new)
+        if groups[-1] and len(groups[-1]) + len(new) > per_archive:
+            groups.append([])
+        groups[-1] += new
+    return [group for group in groups if group]
+
+
+def _split_archive(archive: Path, out_dir: Path, manifest_bytes: int = MANIFEST_BYTES,
+                   per_archive: int = IMAGES_PER_ARCHIVE) -> Iterator[Path]:
+    """Writes a docker-archive of many images as several smaller ones in
+    `out_dir`, each with part of the list of images (manifest.json) and the
+    config and layer files those images name. The archive itself is left as
+    it is. Yields each part once it is written, so the caller can load and
+    delete one before the next takes its space."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive) as tar:
+        members = {posixpath.normpath(member.name): member for member in tar}
+        manifest = json.load(tar.extractfile(members["manifest.json"]))
+        groups, size = [[]], 0
+        for image in manifest:
+            entry_bytes = len(json.dumps(image))
+            if groups[-1] and (len(groups[-1]) >= per_archive or size + entry_bytes > manifest_bytes):
+                groups.append([])
+                size = 0
+            groups[-1].append(image)
+            size += entry_bytes
+        for number, group in enumerate(groups):
+            if not group:
+                continue
+            part = out_dir / f"{archive.stem}-part{number:03d}.tar"
+            with tarfile.open(part, "w") as out:
+                data = json.dumps(group).encode()
+                info = tarfile.TarInfo("manifest.json")
+                info.size = len(data)
+                out.addfile(info, io.BytesIO(data))
+                for name in dict.fromkeys(name for image in group for name in [image["Config"], *image["Layers"]]):
+                    member = members[posixpath.normpath(name)]
+                    for _ in range(8):  # a layer can be a link to the file that holds it
+                        if member.issym():
+                            member = members[posixpath.normpath(posixpath.join(posixpath.dirname(member.name), member.linkname))]
+                        elif member.islnk():
+                            member = members[posixpath.normpath(member.linkname)]
+                        else:
+                            break
+                    info = tarfile.TarInfo(name)
+                    info.size, info.mode, info.mtime = member.size, member.mode, member.mtime
+                    out.addfile(info, tar.extractfile(member))
+            yield part
+
+
+def _load_archive(archive: Path) -> None:
+    """Loads an image archive into the image store. One that podman refuses
+    because its list of images is too long is split and loaded in parts."""
+    result = _docker("load", "-i", str(archive))
+    if result.returncode == 0:
+        return
+    if MANIFEST_TOO_LARGE not in result.stderr:
+        raise RuntimeError(f"loading {archive} failed: {result.stderr.strip()}")
+    parts_dir = archive.with_name(f"{archive.stem}.parts")
+    try:
+        print(f"{archive} lists too many images to load at once; loading it in parts")
+        for part in _split_archive(archive, parts_dir):
+            result = _docker("load", "-i", str(part))
+            if result.returncode != 0:
+                raise RuntimeError(f"loading {part} (a part of {archive}) failed: {result.stderr.strip()}")
+            part.unlink()
+    finally:
+        shutil.rmtree(parts_dir, ignore_errors=True)
 
 
 def _layer_bytes(image_names: list[str]) -> int:
@@ -369,11 +464,11 @@ class SnapshotStore:
 
     def save(self, directory: Path, snapshot_ids: list[str] | None = None) -> dict:
         """Writes the snapshots (all of them, or the listed ones) to
-        `directory`: their records, one archive of all their images and a copy
-        of each task dir. The snapshots stay usable here. Holds the snapshot
+        `directory`: their records, their images in archives of at most
+        IMAGES_PER_ARCHIVE and a copy of each task dir. The snapshots stay usable here. Holds the snapshot
         lock throughout, so nothing is restored or deleted halfway through.
 
-        Returns {"snapshots", "images", "bytes" (the archive's), "unknown"
+        Returns {"snapshots", "images", "bytes" (the archives'), "unknown"
         (listed ids this manager does not have)}."""
         directory = Path(directory)
         with self.snapshots_lock:
@@ -384,19 +479,22 @@ class SnapshotStore:
                 unknown = [i for i in dict.fromkeys(snapshot_ids) if i not in self.snapshots]
             st = time.perf_counter()
             directory.mkdir(parents=True, exist_ok=True)
-            images = sorted({name for snapshot in chosen for name in snapshot.image_names})
-            archive = directory / IMAGES_FILE
-            archive.unlink(missing_ok=True)
-            if images:
-                partial = directory / f"{IMAGES_FILE}.partial"
-                # One archive for all images, so the layers they share (the
-                # task image under each snapshot) are written once. podman
-                # takes several images only with --multi-image-archive.
+            (directory / RECORDS_FILE).unlink(missing_ok=True)  # not whole again until the end
+            for old in _archives(directory):
+                old.unlink()
+            groups = _image_groups(chosen, IMAGES_PER_ARCHIVE)
+            images = [name for group in groups for name in group]
+            for number, group in enumerate(groups):
+                archive = directory / f"images-{number:03d}.tar"
+                partial = archive.with_name(f"{archive.name}.partial")
+                # The images of an archive share layers (the task image under
+                # each snapshot), written once per archive. podman takes
+                # several images only with --multi-image-archive.
                 many = [] if is_docker() else ["--multi-image-archive"]
-                result = _docker("save", *many, "-o", str(partial), *images)
+                result = _docker("save", *many, "-o", str(partial), *group)
                 if result.returncode != 0:
                     partial.unlink(missing_ok=True)
-                    raise RuntimeError(f"saving {len(images)} images failed: {result.stderr.strip()}")
+                    raise RuntimeError(f"saving {len(group)} images failed: {result.stderr.strip()}")
                 partial.replace(archive)
             shutil.rmtree(directory / TASK_DIRS, ignore_errors=True)
             for snapshot in chosen:
@@ -405,7 +503,7 @@ class SnapshotStore:
             partial = directory / f"{RECORDS_FILE}.partial"
             partial.write_text(json.dumps({"snapshots": records}))
             partial.replace(directory / RECORDS_FILE)  # written last: its presence means the save is whole
-        size = archive.stat().st_size if archive.exists() else 0
+        size = sum(archive.stat().st_size for archive in _archives(directory))
         print(f"Saved {len(chosen)} snapshots ({len(images)} images, {size} bytes) to {directory} "
               f"in {time.perf_counter() - st:.2f}s")
         return {"snapshots": len(chosen), "images": len(images), "bytes": size, "unknown": unknown}
@@ -423,11 +521,8 @@ class SnapshotStore:
             raise FileNotFoundError(f"no {RECORDS_FILE} in {directory}")
         st = time.perf_counter()
         records = json.loads(records_path.read_text())["snapshots"]
-        archive = directory / IMAGES_FILE
-        if archive.exists():
-            result = _docker("load", "-i", str(archive))
-            if result.returncode != 0:
-                raise RuntimeError(f"loading {archive} failed: {result.stderr.strip()}")
+        for archive in _archives(directory):
+            _load_archive(archive)
         loaded, missing = [], []
         for record in records:
             snapshot = Snapshot(**{**record, "task_dir": Path(record["task_dir"])})
